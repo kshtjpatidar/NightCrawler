@@ -57,7 +57,7 @@ def test_header_not_sent_to_unrelated_third_parties():
     CRITICAL: Verify that the researcher identification header is NEVER attached
     when making requests to out-of-scope or third-party domains.
     """
-    scope = ScopeManager(allowed_domains=["uxcam.com"], enabled=True)
+    scope = ScopeManager(allowed_domains=["uxcam.com", "*.uxcam.com"], enabled=True)
     hm = HeaderManager(enabled=True, header_name="X-User-Id", header_value="researcher@test.com")
 
     # In-scope URL: header MUST be attached

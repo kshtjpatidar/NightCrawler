@@ -244,7 +244,7 @@ def test_scope_manager_third_party_hosted_service_exclusions():
 
 def test_authentication_manager_headers_and_isolation():
     """Verify AuthenticationManager attaches headers only to authorized in-scope targets."""
-    scope = ScopeManager(allowed_domains=["uxcam.com"], enabled=True)
+    scope = ScopeManager(allowed_domains=["uxcam.com", "*.uxcam.com"], enabled=True)
     auth = AuthenticationManager(
         required_headers={"X-User-Id": "researcher@example.com"},
         optional_headers={"X-Custom-Env": "stage1"},

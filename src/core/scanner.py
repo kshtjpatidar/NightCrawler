@@ -9,7 +9,7 @@ import aiohttp
 import re
 import ssl
 from pathlib import Path
-from typing import List, Dict, Optional, Set, Tuple
+from typing import List, Dict, Optional, Set, Tuple, Any
 from dataclasses import dataclass, field
 from urllib.parse import urljoin, urlparse
 import time
@@ -131,11 +131,32 @@ class NightCrawlerScanner:
         permission_manager: Optional[TestingPermissionManager] = None,
         tool_compatibility_manager: Optional[ToolCompatibilityManager] = None,
         audit_logger: Optional[AuditLogger] = None,
-        request_policy_manager: Optional[RequestPolicyManager] = None
+        request_policy_manager: Optional[RequestPolicyManager] = None,
+        effective_policy: Optional[Any] = None
     ):
+        self.effective_policy = effective_policy
         self.profile = profile
 
-        if self.profile:
+        if self.effective_policy:
+            self.scope_manager = self.effective_policy.scope_manager
+            self.request_policy_manager = self.effective_policy.request_policy_manager
+            self.rate_limiter = self.request_policy_manager.global_limiter
+            self.auth_manager = self.effective_policy.auth_manager
+            self.header_manager = header_manager or HeaderManager()
+            self.permission_manager = self.effective_policy.permission_manager
+            self.tool_compatibility_manager = self.effective_policy.tool_compatibility_manager
+            self.audit_logger = self.effective_policy.audit_logger
+
+            self.concurrency = self.effective_policy.concurrency
+            self.timeout_seconds = self.effective_policy.timeout
+            self.max_requests_per_second = self.effective_policy.max_rps
+            self.strict_scope = self.effective_policy.strict_scope
+            self.verify_tls = self.effective_policy.verify_tls
+            self.javascript_extraction = self.permission_manager.is_permitted("javascript_analysis")
+            self.endpoint_discovery = self.permission_manager.is_permitted("endpoint_discovery")
+            self.secret_detection = self.permission_manager.is_permitted("secret_detection")
+            self.validate_keys = self.permission_manager.is_permitted("credential_validation")
+        elif self.profile:
             self.scope_manager = scope_manager or ScopeManager.from_profile(self.profile)
             self.request_policy_manager = request_policy_manager or RequestPolicyManager.from_profile(
                 self.profile,
@@ -189,6 +210,7 @@ class NightCrawlerScanner:
 
         # Centralized HTTP client
         self.http_client = NightCrawlerHttpClient(
+            effective_policy=self.effective_policy,
             scope_manager=self.scope_manager,
             rate_limiter=self.rate_limiter,
             header_manager=self.header_manager,

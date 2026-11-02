@@ -16,7 +16,7 @@ from src.core.header_manager import HeaderManager
 @pytest.fixture
 def uxcam_scope():
     return ScopeManager(
-        allowed_domains=["uxcam.com", "uxc.am"],
+        allowed_domains=["uxcam.com", "*.uxcam.com", "uxc.am", "*.uxc.am"],
         excluded_domains=["tara.uxcam.com", "connect.uxcam.com"],
         enabled=True
     )
@@ -155,3 +155,27 @@ async def test_redirect_to_out_of_scope_is_blocked(uxcam_scope):
     assert final_url == "https://app.uxcam.com/redirect"
     # Session.get should have been called only once for the in-scope URL, not for evil.com
     assert mock_session.get.call_count == 1
+
+
+def test_exact_vs_wildcard_domain_separation():
+    """Verify exact host and wildcard entries are stored and validated separately."""
+    # Apex only: matches example.com, but NOT subdomains
+    apex_scope = ScopeManager(allowed_domains=["example.com"], enabled=True)
+    assert apex_scope.is_host_allowed("example.com") is True
+    assert apex_scope.is_host_allowed("sub.example.com") is False
+    assert apex_scope.is_host_allowed("evil-example.com") is False
+
+    # Wildcard only: matches subdomains, but NOT apex example.com
+    wild_scope = ScopeManager(allowed_domains=["*.example.com"], enabled=True)
+    assert wild_scope.is_host_allowed("sub.example.com") is True
+    assert wild_scope.is_host_allowed("a.b.example.com") is True
+    assert wild_scope.is_host_allowed("example.com") is False
+    assert wild_scope.is_host_allowed("evil-example.com") is False
+
+    # Both apex and wildcard: matches both apex and subdomains
+    full_scope = ScopeManager(allowed_domains=["example.com", "*.example.com"], enabled=True)
+    assert full_scope.is_host_allowed("example.com") is True
+    assert full_scope.is_host_allowed("sub.example.com") is True
+    assert full_scope.is_host_allowed("api.corp.example.com") is True
+    assert full_scope.is_host_allowed("evil-example.com") is False
+

@@ -37,7 +37,7 @@ def test_tls_verification_enabled_by_default():
 @pytest.mark.asyncio
 async def test_ssl_certificate_error_raises_without_fallback():
     """Verify that when TLS verification fails, error is raised and no insecure fallback occurs."""
-    scope = ScopeManager(allowed_domains=["uxcam.com"], enabled=True)
+    scope = ScopeManager(allowed_domains=["uxcam.com", "*.uxcam.com"], enabled=True)
     limiter = GlobalRateLimiter(max_requests_per_second=100.0)
     hm = HeaderManager()
     client = NightCrawlerHttpClient(scope, limiter, hm, verify_tls=True)
@@ -64,7 +64,7 @@ async def test_ssl_certificate_error_raises_without_fallback():
 
 def test_insecure_tls_rejected_in_strict_compliance_mode():
     """Verify that disabling TLS verification in strict compliance mode is rejected."""
-    scope = ScopeManager(allowed_domains=["uxcam.com"], enabled=True)
+    scope = ScopeManager(allowed_domains=["uxcam.com", "*.uxcam.com"], enabled=True)
     limiter = GlobalRateLimiter()
     hm = HeaderManager()
 

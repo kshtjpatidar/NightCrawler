@@ -26,31 +26,45 @@ class AuthenticationManager:
         auth_def: Optional[AuthenticationDefinition] = None,
         required_headers: Optional[Dict[str, str]] = None,
         optional_headers: Optional[Dict[str, str]] = None,
-        scope_manager: Optional[ScopeManager] = None
+        scope_manager: Optional[ScopeManager] = None,
+        raise_if_missing: bool = True
     ):
         self.auth_def = auth_def or AuthenticationDefinition()
         self.required_headers = required_headers or {}
         self.optional_headers = optional_headers or {}
         self.scope_manager = scope_manager
+        self.raise_if_missing = raise_if_missing
 
         # Resolved credentials in memory
         self._auth_header_name: Optional[str] = None
         self._auth_header_value: Optional[str] = None
         self._cookie_header_value: Optional[str] = None
         self._custom_headers: Dict[str, str] = {}
+        self._missing_required_credentials: List[str] = []
 
         self._initialize_credentials()
 
     @classmethod
-    def from_profile(cls, profile: ProgramProfile, scope_manager: Optional[ScopeManager] = None) -> "AuthenticationManager":
+    def from_profile(
+        cls,
+        profile: ProgramProfile,
+        scope_manager: Optional[ScopeManager] = None,
+        raise_if_missing: bool = False
+    ) -> "AuthenticationManager":
         req_headers = profile.resolve_headers()
         opt_headers = profile.headers.get("optional", {})
         return cls(
             auth_def=profile.authentication,
             required_headers=req_headers,
             optional_headers=opt_headers,
-            scope_manager=scope_manager
+            scope_manager=scope_manager,
+            raise_if_missing=raise_if_missing
         )
+
+    def set_custom_header(self, name: str, value: str):
+        """Set or update a custom header value in memory."""
+        if name and value:
+            self._custom_headers[name.strip()] = value.strip()
 
     def _initialize_credentials(self):
         """Resolve and validate credentials from environment variables or secure session files."""
@@ -63,8 +77,11 @@ class AuthenticationManager:
                 env_key = k.upper().replace("-", "_")
                 val = os.getenv(env_key, "")
             if not val:
-                raise ValueError(f"Required header '{k}' has no value provided and environment variable is not set.")
-            self._custom_headers[k] = val
+                self._missing_required_credentials.append(f"Required header '{k}'")
+                if self.raise_if_missing:
+                    raise ValueError(f"Required header '{k}' has no value provided and environment variable is not set.")
+            else:
+                self._custom_headers[k] = val
 
         for k, v in self.optional_headers.items():
             if v:
@@ -81,21 +98,27 @@ class AuthenticationManager:
             if not token and self.auth_def.session_file:
                 token = self._read_session_file(self.auth_def.session_file)
             if not token:
-                raise ValueError(f"Missing required Bearer token in environment variable '{token_env}'.")
-            header_name = self.auth_def.header_name or "Authorization"
-            prefix = self.auth_def.header_prefix or "Bearer "
-            self._auth_header_name = header_name
-            self._auth_header_value = f"{prefix}{token.strip()}"
+                self._missing_required_credentials.append(f"Bearer token ({token_env})")
+                if self.raise_if_missing:
+                    raise ValueError(f"Missing required Bearer token in environment variable '{token_env}'.")
+            else:
+                header_name = self.auth_def.header_name or "Authorization"
+                prefix = self.auth_def.header_prefix or "Bearer "
+                self._auth_header_name = header_name
+                self._auth_header_value = f"{prefix}{token.strip()}"
 
         elif auth_type == "api_key":
             key_env = self.auth_def.token_env or "PROGRAM_API_KEY"
             key = os.getenv(key_env)
             if not key:
-                raise ValueError(f"Missing required API key in environment variable '{key_env}'.")
-            header_name = self.auth_def.header_name or "X-API-Key"
-            prefix = self.auth_def.header_prefix or ""
-            self._auth_header_name = header_name
-            self._auth_header_value = f"{prefix}{key.strip()}"
+                self._missing_required_credentials.append(f"API key ({key_env})")
+                if self.raise_if_missing:
+                    raise ValueError(f"Missing required API key in environment variable '{key_env}'.")
+            else:
+                header_name = self.auth_def.header_name or "X-API-Key"
+                prefix = self.auth_def.header_prefix or ""
+                self._auth_header_name = header_name
+                self._auth_header_value = f"{prefix}{key.strip()}"
 
         elif auth_type == "cookie":
             cookie_env = self.auth_def.cookie_env or "PROGRAM_SESSION_COOKIE"
@@ -103,8 +126,11 @@ class AuthenticationManager:
             if not cookie and self.auth_def.session_file:
                 cookie = self._read_session_file(self.auth_def.session_file)
             if not cookie:
-                raise ValueError(f"Missing required session cookie in environment variable '{cookie_env}'.")
-            self._cookie_header_value = cookie.strip()
+                self._missing_required_credentials.append(f"Session cookie ({cookie_env})")
+                if self.raise_if_missing:
+                    raise ValueError(f"Missing required session cookie in environment variable '{cookie_env}'.")
+            else:
+                self._cookie_header_value = cookie.strip()
 
         elif auth_type == "basic":
             user_env = self.auth_def.username_env or "PROGRAM_BASIC_USER"
@@ -112,10 +138,22 @@ class AuthenticationManager:
             user = os.getenv(user_env, "")
             pwd = os.getenv(pass_env, "")
             if not user or not pwd:
-                raise ValueError(f"Missing Basic Auth credentials in environment variables '{user_env}'/'{pass_env}'.")
-            creds = base64.b64encode(f"{user}:{pwd}".encode()).decode()
-            self._auth_header_name = "Authorization"
-            self._auth_header_value = f"Basic {creds}"
+                self._missing_required_credentials.append(f"Basic Auth credentials ({user_env}/{pass_env})")
+                if self.raise_if_missing:
+                    raise ValueError(f"Missing Basic Auth credentials in environment variables '{user_env}'/'{pass_env}'.")
+            else:
+                creds = base64.b64encode(f"{user}:{pwd}".encode()).decode()
+                self._auth_header_name = "Authorization"
+                self._auth_header_value = f"Basic {creds}"
+
+    def validate_credentials_present(self):
+        """Validate that all mandatory headers and credentials have values before scanning begins."""
+        if self._missing_required_credentials:
+            missing_str = ", ".join(self._missing_required_credentials)
+            raise ValueError(
+                f"Mandatory authentication credentials missing: {missing_str}. "
+                "Set the corresponding environment variable before scanning."
+            )
 
     def _read_session_file(self, file_path_str: str) -> str:
         """Safely read session file, verifying strict permissions (0600)."""

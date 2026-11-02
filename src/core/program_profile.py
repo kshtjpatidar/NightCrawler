@@ -14,6 +14,52 @@ import yaml
 import json
 
 
+def strict_bool(val: Any, field_name: str = "field") -> bool:
+    """Strictly convert value to boolean, preventing 'false' == True bugs."""
+    if isinstance(val, bool):
+        return val
+    if isinstance(val, (int, float)):
+        if val == 1:
+            return True
+        elif val == 0:
+            return False
+        raise ValueError(f"Invalid boolean value for {field_name}: {val}")
+    if isinstance(val, str):
+        v = val.strip().lower()
+        if v in ("true", "1", "yes", "on"):
+            return True
+        elif v in ("false", "0", "no", "off"):
+            return False
+        raise ValueError(f"Invalid boolean string for {field_name}: '{val}'")
+    raise TypeError(f"Expected boolean for {field_name}, got {type(val).__name__}")
+
+
+def strict_positive_float(val: Any, field_name: str = "rate") -> float:
+    """Strictly validate positive, non-NaN, non-Inf float."""
+    try:
+        f = float(val)
+    except (ValueError, TypeError):
+        raise ValueError(f"Invalid numeric value for {field_name}: {val}")
+    if math.isnan(f) or math.isinf(f):
+        raise ValueError(f"{field_name} cannot be NaN or Infinity, got {val}")
+    if f <= 0:
+        raise ValueError(f"{field_name} must be strictly positive (> 0), got {val}")
+    return f
+
+
+def strict_positive_int(val: Any, field_name: str = "integer") -> int:
+    """Strictly validate positive integer."""
+    if isinstance(val, bool):
+        raise TypeError(f"Expected integer for {field_name}, got bool")
+    try:
+        i = int(val)
+    except (ValueError, TypeError):
+        raise ValueError(f"Invalid integer value for {field_name}: {val}")
+    if i <= 0:
+        raise ValueError(f"{field_name} must be strictly positive (> 0), got {val}")
+    return i
+
+
 @dataclass
 class ScopeDefinition:
     enabled: bool = True
@@ -192,6 +238,11 @@ class ProgramProfile:
         with open(path, "w", encoding="utf-8") as f:
             yaml.dump(data, f, default_flow_style=False, sort_keys=False)
 
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any], source_ref: str = "") -> "ProgramProfile":
+        """Convenience method delegating to PolicyParser.from_dict."""
+        return PolicyParser.from_dict(data, source_ref=source_ref)
+
 
 class PolicyParser:
     """Parses program policies from YAML, JSON, dictionaries, or unstructured text."""
@@ -216,7 +267,7 @@ class PolicyParser:
 
         scope_raw = data.get("scope", {})
         scope = ScopeDefinition(
-            enabled=bool(scope_raw.get("enabled", True)),
+            enabled=strict_bool(scope_raw.get("enabled", True), "scope.enabled") if "enabled" in scope_raw else True,
             allowed_domains=[d.strip() for d in scope_raw.get("allowed_domains", []) if d.strip()],
             excluded_domains=[d.strip() for d in scope_raw.get("excluded_domains", []) if d.strip()],
             allowed_ips=[ip.strip() for ip in scope_raw.get("allowed_ips", []) if ip.strip()],
@@ -235,18 +286,42 @@ class PolicyParser:
         try:
             max_rps = float(max_rps_val)
         except (ValueError, TypeError):
-            max_rps = 5.0
+            raise ValueError(f"Invalid numeric value for request_policy.max_rps: {max_rps_val}")
+
+        concurrency_val = rp_raw.get("concurrency", 1)
+        try:
+            concurrency = int(concurrency_val)
+        except (ValueError, TypeError):
+            raise ValueError(f"Invalid integer value for request_policy.concurrency: {concurrency_val}")
+
+        timeout_val = rp_raw.get("timeout", 30)
+        try:
+            timeout = int(timeout_val)
+        except (ValueError, TypeError):
+            raise ValueError(f"Invalid integer value for request_policy.timeout: {timeout_val}")
+
+        crawl_depth_val = rp_raw.get("crawl_depth", 1)
+        try:
+            crawl_depth = int(crawl_depth_val)
+        except (ValueError, TypeError):
+            raise ValueError(f"Invalid integer value for request_policy.crawl_depth: {crawl_depth_val}")
+
+        per_host_rps_val = rp_raw.get("per_host_rps", max_rps)
+        try:
+            per_host_rps = float(per_host_rps_val)
+        except (ValueError, TypeError):
+            raise ValueError(f"Invalid numeric value for request_policy.per_host_rps: {per_host_rps_val}")
 
         request_policy = RequestPolicyDefinition(
             max_rps=max_rps,
-            concurrency=int(rp_raw.get("concurrency", 1)),
-            timeout=int(rp_raw.get("timeout", 30)),
+            concurrency=concurrency,
+            timeout=timeout,
             max_retries=int(rp_raw.get("max_retries", 2)),
-            crawl_depth=int(rp_raw.get("crawl_depth", 1)),
+            crawl_depth=crawl_depth,
             burst=int(rp_raw.get("burst", 1)),
-            verify_tls=bool(rp_raw.get("verify_tls", True)),
-            strict_scope=bool(rp_raw.get("strict_scope", True)),
-            per_host_rps=float(rp_raw.get("per_host_rps", max_rps))
+            verify_tls=strict_bool(rp_raw.get("verify_tls", True), "request_policy.verify_tls") if "verify_tls" in rp_raw else True,
+            strict_scope=strict_bool(rp_raw.get("strict_scope", True), "request_policy.strict_scope") if "strict_scope" in rp_raw else True,
+            per_host_rps=per_host_rps
         )
 
         headers = data.get("headers", {"required": {}, "optional": {}})
@@ -265,17 +340,17 @@ class PolicyParser:
 
         tp_raw = data.get("testing_permissions", {})
         testing_permissions = TestingPermissionsDefinition(
-            passive_recon=bool(tp_raw.get("passive_recon", True)),
-            active_recon=bool(tp_raw.get("active_recon", False)),
-            endpoint_discovery=bool(tp_raw.get("endpoint_discovery", True)),
-            javascript_analysis=bool(tp_raw.get("javascript_analysis", True)),
-            secret_detection=bool(tp_raw.get("secret_detection", True)),
-            credential_validation=bool(tp_raw.get("credential_validation", False)),
-            fuzzing=bool(tp_raw.get("fuzzing", False)),
-            injection_testing=bool(tp_raw.get("injection_testing", False)),
+            passive_recon=strict_bool(tp_raw.get("passive_recon", True), "testing_permissions.passive_recon") if "passive_recon" in tp_raw else True,
+            active_recon=strict_bool(tp_raw.get("active_recon", False), "testing_permissions.active_recon") if "active_recon" in tp_raw else False,
+            endpoint_discovery=strict_bool(tp_raw.get("endpoint_discovery", True), "testing_permissions.endpoint_discovery") if "endpoint_discovery" in tp_raw else True,
+            javascript_analysis=strict_bool(tp_raw.get("javascript_analysis", True), "testing_permissions.javascript_analysis") if "javascript_analysis" in tp_raw else True,
+            secret_detection=strict_bool(tp_raw.get("secret_detection", True), "testing_permissions.secret_detection") if "secret_detection" in tp_raw else True,
+            credential_validation=strict_bool(tp_raw.get("credential_validation", False), "testing_permissions.credential_validation") if "credential_validation" in tp_raw else False,
+            fuzzing=strict_bool(tp_raw.get("fuzzing", False), "testing_permissions.fuzzing") if "fuzzing" in tp_raw else False,
+            injection_testing=strict_bool(tp_raw.get("injection_testing", False), "testing_permissions.injection_testing") if "injection_testing" in tp_raw else False,
             destructive_testing=False,  # Enforce hard safety ceiling
             denial_of_service=False,   # Enforce hard safety ceiling
-            social_engineering=bool(tp_raw.get("social_engineering", False))
+            social_engineering=strict_bool(tp_raw.get("social_engineering", False), "testing_permissions.social_engineering") if "social_engineering" in tp_raw else False
         )
 
         tr_raw = data.get("tool_restrictions", {})
@@ -291,7 +366,7 @@ class PolicyParser:
             program_name=rep_raw.get("program_name", p_name)
         )
 
-        requires_review = bool(data.get("requires_review", False))
+        requires_review = strict_bool(data.get("requires_review", False), "requires_review") if "requires_review" in data else False
         review_notes = list(data.get("review_notes", []))
 
         source_reference = data.get("source_reference", "")

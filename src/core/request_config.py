@@ -18,8 +18,8 @@ from src.core.header_manager import HeaderManager
 class NightCrawlerConfig:
     # Scope
     scope_enabled: bool = True
-    allowed_domains: List[str] = field(default_factory=lambda: ["uxcam.com", "uxc.am"])
-    excluded_domains: List[str] = field(default_factory=lambda: ["tara.uxcam.com", "connect.uxcam.com"])
+    allowed_domains: List[str] = field(default_factory=lambda: ["uxcam.com", "*.uxcam.com", "uxc.am", "*.uxc.am"])
+    excluded_domains: List[str] = field(default_factory=lambda: ["tara.uxcam.com", "*.tara.uxcam.com", "connect.uxcam.com", "*.connect.uxcam.com"])
 
     # Researcher Header
     custom_header_enabled: bool = True

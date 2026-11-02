@@ -31,16 +31,31 @@ class ReportManager:
     and Markdown reports containing full compliance metadata and lifecycle classifications.
     """
 
-    def __init__(self, profile: Optional[ProgramProfile] = None, reporter_name: str = "Security Researcher"):
+    def __init__(
+        self,
+        profile: Optional[ProgramProfile] = None,
+        reporter_name: str = "Security Researcher",
+        policy: Optional[Any] = None
+    ):
         self.profile = profile
+        self.policy = policy
         self.reporter_name = reporter_name
         self.timestamp = datetime.datetime.now(datetime.timezone.utc)
 
     def _build_base_dict(self, findings: List, scan_result, tools_report: Optional[Dict[str, Any]] = None, stats: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """Build structured dictionary containing all required metadata and classified findings."""
-        prog_id = self.profile.id if self.profile else "custom-program"
-        prog_name = self.profile.name if self.profile else (getattr(scan_result, 'target', 'Bug Bounty Recon'))
-        policy_ver = self.profile.version if self.profile else "1.0.0"
+        if self.policy:
+            prog_id = self.policy.program_id
+            prog_name = self.policy.program_name
+            policy_ver = self.policy.version
+        elif self.profile:
+            prog_id = self.profile.id
+            prog_name = self.profile.name
+            policy_ver = self.profile.version
+        else:
+            prog_id = "custom-program"
+            prog_name = getattr(scan_result, 'target', 'Bug Bounty Recon') if scan_result else 'Bug Bounty Recon'
+            policy_ver = "1.0.0"
 
         severity_counts = {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0}
         vulnerabilities = []
@@ -74,14 +89,21 @@ class ReportManager:
 
             impact = get_impact_info(p_name)
             priority = {"CRITICAL": "P1", "HIGH": "P2", "MEDIUM": "P3", "LOW": "P4"}.get(sev, "P3")
+            verification_label = "Active Verified Secret" if is_keyhacks else "Potential Secret — Not Verified"
 
             vulnerabilities.append({
-                "title": f"[{priority}] Potential {p_name} Exposure in Client-Side JavaScript",
+                "title": f"[{priority}] Potential {p_name} Exposure ({verification_label})",
                 "asset": url,
                 "category": "Sensitive Data Exposure > Exposed API Keys",
                 "severity": f"{priority} - {sev}",
                 "cvss_score": impact.get('cvss', '5.3'),
                 "lifecycle_classification": lifecycle_status,
+                "pattern_matched": True,
+                "pattern_validated": True,
+                "credential_verified": bool(is_keyhacks),
+                "manual_review_status": "PENDING",
+                "validation_status": "INDEPENDENTLY_VERIFIED" if is_keyhacks else "NOT_VERIFIED",
+                "verification_label": verification_label,
                 "pattern_validation": {
                     "status": "PASSED",
                     "pattern_name": p_name,
@@ -204,6 +226,7 @@ class ReportManager:
                     f"- **Affected Asset:** `{f['asset']}`",
                     f"- **Severity:** {f['severity']}",
                     f"- **Lifecycle Status:** `{f['lifecycle_classification']}`",
+                    f"- **Validation Status:** **{f.get('verification_label', 'Potential Secret — Not Verified')}**",
                     f"- **Pattern Validation:** {f['pattern_validation']['status']} ({f['pattern_validation']['description']})",
                     f"- **Credential Verification:** {f['credential_verification']['status']} *({f['credential_verification']['notice']})*",
                     f"- **Masked Evidence:** `{f['evidence']['masked_secret']}`",

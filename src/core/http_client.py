@@ -35,7 +35,7 @@ class NightCrawlerHttpClient:
 
     def __init__(
         self,
-        scope_manager: ScopeManager,
+        scope_manager: Optional[Any] = None,
         rate_limiter: Optional[GlobalRateLimiter] = None,
         header_manager: Optional[HeaderManager] = None,
         timeout_seconds: int = 30,
@@ -45,30 +45,46 @@ class NightCrawlerHttpClient:
         max_retries: int = 2,
         request_policy_manager: Optional[Any] = None,
         auth_manager: Optional[Any] = None,
-        audit_logger: Optional[Any] = None
+        audit_logger: Optional[Any] = None,
+        effective_policy: Optional[Any] = None
     ):
-        self.scope_manager = scope_manager
-        self.request_policy_manager = request_policy_manager
-        self.auth_manager = auth_manager
-        self.audit_logger = audit_logger
+        # Support passing an EffectivePolicy as the first argument or explicitly
+        if hasattr(scope_manager, "request_policy_manager") and hasattr(scope_manager, "scope_manager"):
+            effective_policy = scope_manager
+            scope_manager = effective_policy.scope_manager
 
-        if rate_limiter:
-            self.rate_limiter = rate_limiter
-        elif request_policy_manager:
-            self.rate_limiter = request_policy_manager.global_limiter
+        if effective_policy:
+            self.effective_policy = effective_policy
+            self.scope_manager = effective_policy.scope_manager
+            self.request_policy_manager = effective_policy.request_policy_manager
+            self.auth_manager = effective_policy.auth_manager
+            self.audit_logger = effective_policy.audit_logger
+            self.rate_limiter = self.request_policy_manager.global_limiter
+            self.header_manager = header_manager or HeaderManager()
+            self.timeout = aiohttp.ClientTimeout(total=effective_policy.timeout)
+            self.verify_tls = effective_policy.verify_tls
+            self.strict_mode = effective_policy.strict_scope
+            self.max_redirects = max_redirects
+            self.max_retries = max_retries
         else:
-            self.rate_limiter = GlobalRateLimiter(max_requests_per_second=5.0)
+            self.effective_policy = None
+            self.scope_manager = scope_manager
+            self.request_policy_manager = request_policy_manager
+            self.auth_manager = auth_manager
+            self.audit_logger = audit_logger
+            if rate_limiter:
+                self.rate_limiter = rate_limiter
+            elif request_policy_manager:
+                self.rate_limiter = request_policy_manager.global_limiter
+            else:
+                self.rate_limiter = GlobalRateLimiter(max_requests_per_second=5.0)
 
-        if header_manager:
-            self.header_manager = header_manager
-        else:
-            self.header_manager = HeaderManager()
-
-        self.timeout = aiohttp.ClientTimeout(total=timeout_seconds)
-        self.verify_tls = verify_tls
-        self.strict_mode = strict_mode
-        self.max_redirects = max_redirects
-        self.max_retries = max_retries
+            self.header_manager = header_manager or HeaderManager()
+            self.timeout = aiohttp.ClientTimeout(total=timeout_seconds)
+            self.verify_tls = verify_tls
+            self.strict_mode = strict_mode
+            self.max_redirects = max_redirects
+            self.max_retries = max_retries
 
         if self.strict_mode and not self.verify_tls:
             raise ValueError("Insecure TLS configuration is prohibited in strict compliance mode.")

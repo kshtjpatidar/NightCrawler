@@ -22,9 +22,32 @@ class RequestPolicyManager:
     def __init__(
         self,
         policy: Optional[RequestPolicyDefinition] = None,
-        global_override_rps: Optional[float] = None
+        global_override_rps: Optional[float] = None,
+        max_rps: Optional[float] = None,
+        per_host_rps: Optional[float] = None,
+        concurrency_limit: Optional[int] = None,
+        timeout: Optional[int] = None,
+        crawl_depth: Optional[int] = None,
+        verify_tls: Optional[bool] = None,
+        strict_scope: Optional[bool] = None,
+        max_retries: Optional[int] = None,
+        burst: Optional[int] = None
     ):
-        self.policy = policy or RequestPolicyDefinition()
+        if policy is None:
+            effective_max_rps = max_rps if max_rps is not None else 5.0
+            self.policy = RequestPolicyDefinition(
+                max_rps=effective_max_rps,
+                per_host_rps=per_host_rps if per_host_rps is not None else effective_max_rps,
+                concurrency=concurrency_limit if concurrency_limit is not None else 1,
+                timeout=timeout if timeout is not None else 30,
+                crawl_depth=crawl_depth if crawl_depth is not None else 1,
+                verify_tls=verify_tls if verify_tls is not None else True,
+                strict_scope=strict_scope if strict_scope is not None else True,
+                max_retries=max_retries if max_retries is not None else 2,
+                burst=burst if burst is not None else 1
+            )
+        else:
+            self.policy = policy
 
         # Determine strictest rate limit
         effective_rps = self.policy.max_rps

@@ -20,7 +20,7 @@ def test_uncoordinated_tools_disabled_in_strict_compliance_mode():
     Verify that tools which send active HTTP requests but cannot coordinate
     with the centralized 5 RPS rate limiter are disabled in strict mode.
     """
-    scope = ScopeManager(allowed_domains=["uxcam.com"])
+    scope = ScopeManager(allowed_domains=["uxcam.com", "*.uxcam.com"])
     hm = HeaderManager(enabled=True, header_name="X-User-Id", header_value="test@example.com")
 
     # Katana operates as an independent OS process and cannot guarantee shared 5 RPS rate limit
@@ -47,7 +47,7 @@ def test_uncoordinated_tools_disabled_in_strict_compliance_mode():
 def test_passive_subfinder_filters_all_outputs_to_scope():
     """Verify passive DNS tool Subfinder strictly filters subdomains to allowed scope."""
     scope = ScopeManager(
-        allowed_domains=["uxcam.com"],
+        allowed_domains=["uxcam.com", "*.uxcam.com"],
         excluded_domains=["tara.uxcam.com"]
     )
     subfinder = SubfinderIntegration(scope_manager=scope)
@@ -81,7 +81,7 @@ def test_passive_subfinder_filters_all_outputs_to_scope():
 def test_archive_tools_filter_all_scraped_urls():
     """Verify GAU output from public web archives is strictly filtered to authorized scope."""
     scope = ScopeManager(
-        allowed_domains=["uxcam.com"],
+        allowed_domains=["uxcam.com", "*.uxcam.com"],
         excluded_domains=["connect.uxcam.com"]
     )
     gau = GauIntegration(scope_manager=scope)
@@ -106,7 +106,7 @@ def test_archive_tools_filter_all_scraped_urls():
 
 def test_jsluice_offline_ast_scope_filtering():
     """Verify JSLuice offline parser output is filtered strictly to in-scope URLs."""
-    scope = ScopeManager(allowed_domains=["uxcam.com"])
+    scope = ScopeManager(allowed_domains=["uxcam.com", "*.uxcam.com"])
     jsluice = JSLuiceIntegration(scope_manager=scope)
 
     mock_extracted_urls = (

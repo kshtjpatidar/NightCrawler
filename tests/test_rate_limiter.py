@@ -39,7 +39,7 @@ async def test_maximum_5_rps_under_concurrency():
 @pytest.mark.asyncio
 async def test_rate_limiter_accounts_for_redirects():
     """Verify each redirect hop consumes a token from the centralized rate limiter."""
-    scope = ScopeManager(allowed_domains=["uxcam.com"], enabled=True)
+    scope = ScopeManager(allowed_domains=["uxcam.com", "*.uxcam.com"], enabled=True)
     limiter = GlobalRateLimiter(max_requests_per_second=100.0)
     hm = HeaderManager(enabled=False)
     client = NightCrawlerHttpClient(scope, limiter, hm)
@@ -79,7 +79,7 @@ async def test_rate_limiter_accounts_for_redirects():
 async def test_rate_limiter_accounts_for_retries():
     """Verify each retry attempt consumes a rate limiter token."""
     import aiohttp
-    scope = ScopeManager(allowed_domains=["uxcam.com"], enabled=True)
+    scope = ScopeManager(allowed_domains=["uxcam.com", "*.uxcam.com"], enabled=True)
     limiter = GlobalRateLimiter(max_requests_per_second=100.0)
     hm = HeaderManager(enabled=False)
     client = NightCrawlerHttpClient(scope, limiter, hm, max_retries=2)

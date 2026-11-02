@@ -15,7 +15,7 @@ from src.output.html_report import HtmlReportGenerator, ReportConfig, mask_secre
 
 def test_endpoint_discovery_and_metadata_extraction():
     """Verify endpoint extractor parses routes, methods, parameters, and source maps."""
-    scope = ScopeManager(allowed_domains=["uxcam.com"])
+    scope = ScopeManager(allowed_domains=["uxcam.com", "*.uxcam.com"])
     extractor = EndpointExtractor(scope_manager=scope)
 
     js_code = """

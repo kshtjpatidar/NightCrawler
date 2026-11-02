@@ -65,7 +65,7 @@ def test_reject_non_positive_rps_and_enforce_uxcam_max():
 
     # UXCam profile rejects RPS > 5.0
     cfg_uxcam = NightCrawlerConfig(
-        allowed_domains=["uxcam.com", "uxc.am"],
+        allowed_domains=["uxcam.com", "*.uxcam.com", "uxc.am", "*.uxc.am"],
         max_requests_per_second=6.0
     )
     with pytest.raises(ValueError, match="UXCam bug bounty policy enforces a strict maximum rate limit of 5"):
@@ -73,7 +73,7 @@ def test_reject_non_positive_rps_and_enforce_uxcam_max():
 
     # UXCam profile accepts RPS <= 5.0
     cfg_uxcam_valid = NightCrawlerConfig(
-        allowed_domains=["uxcam.com", "uxc.am"],
+        allowed_domains=["uxcam.com", "*.uxcam.com", "uxc.am", "*.uxc.am"],
         max_requests_per_second=5.0
     )
     limiter = cfg_uxcam_valid.get_rate_limiter()
@@ -107,7 +107,7 @@ def test_researcher_id_environment_passing():
 async def test_excluded_hosts_are_never_fetched():
     """Integration test proving excluded hosts and their subdomains are NEVER fetched."""
     scope = ScopeManager(
-        allowed_domains=["uxcam.com", "uxc.am"],
+        allowed_domains=["uxcam.com", "*.uxcam.com", "uxc.am", "*.uxc.am"],
         excluded_domains=["tara.uxcam.com", "connect.uxcam.com"],
         enabled=True
     )
@@ -138,7 +138,7 @@ async def test_excluded_hosts_are_never_fetched():
 async def test_out_of_scope_redirect_destinations_are_never_fetched():
     """Integration test proving out-of-scope and excluded redirect targets are NEVER fetched."""
     scope = ScopeManager(
-        allowed_domains=["uxcam.com", "uxc.am"],
+        allowed_domains=["uxcam.com", "*.uxcam.com", "uxc.am", "*.uxc.am"],
         excluded_domains=["tara.uxcam.com", "connect.uxcam.com"],
         enabled=True
     )
@@ -200,7 +200,7 @@ async def test_out_of_scope_redirect_destinations_are_never_fetched():
 async def test_every_in_scope_request_carries_required_header():
     """Integration test proving every in-scope request (including in-scope redirects) carries X-User-Id."""
     scope = ScopeManager(
-        allowed_domains=["uxcam.com", "uxc.am"],
+        allowed_domains=["uxcam.com", "*.uxcam.com", "uxc.am", "*.uxc.am"],
         excluded_domains=["tara.uxcam.com", "connect.uxcam.com"],
         enabled=True
     )

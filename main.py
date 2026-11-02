@@ -33,6 +33,7 @@ from src.validators.keyhacks import KeyHacksValidator, ValidationStatus
 # Multi-Program Framework Components
 from src.core.program_manager import ProgramManager
 from src.core.program_profile import ProgramProfile, PolicyParser, PolicyValidator
+from src.core.effective_policy import EffectivePolicy
 from src.core.request_policy import RequestPolicyManager
 from src.core.auth_manager import AuthenticationManager
 from src.core.permissions import TestingPermissionManager
@@ -129,39 +130,6 @@ def main(ctx, target, target_list, urls, output, concurrency, depth, timeout,
     # Load base fallback configuration
     cfg = load_config(config_file)
 
-    # If profile exists, merge profile attributes into cfg
-    if active_profile:
-        cfg.program_name = active_profile.name
-        if not allowed_domains and active_profile.scope.allowed_domains:
-            cfg.allowed_domains = list(active_profile.scope.allowed_domains)
-        if not excluded_domains and active_profile.scope.excluded_domains:
-            cfg.excluded_domains = list(active_profile.scope.excluded_domains)
-        if max_rps is None:
-            cfg.max_requests_per_second = active_profile.request_policy.max_rps
-        if concurrency is None:
-            cfg.concurrency = active_profile.request_policy.concurrency
-        if timeout is None:
-            cfg.timeout = active_profile.request_policy.timeout
-        if depth is None:
-            cfg.depth = active_profile.request_policy.crawl_depth
-        if verify_tls is None:
-            cfg.verify_tls = active_profile.request_policy.verify_tls
-        if strict_scope is None:
-            cfg.strict_scope = active_profile.request_policy.strict_scope
-        if template is None:
-            cfg.default_template = active_profile.reporting.default_template
-        if active_profile.reporting.default_format:
-            cfg.default_format = active_profile.reporting.default_format
-
-        # Validate active profile policy before scanning
-        policy_errors = PolicyValidator.validate(active_profile)
-        if policy_errors:
-            click.echo(click.style(f"\n[!] POLICY ERROR: Program profile '{active_profile.id}' failed validation:", fg='red', bold=True))
-            for err in policy_errors:
-                click.echo(click.style(f"    - {err}", fg='yellow'))
-            click.echo()
-            sys.exit(1)
-
     # Merge CLI options onto configuration
     if concurrency is not None:
         cfg.concurrency = concurrency
@@ -225,6 +193,34 @@ def main(ctx, target, target_list, urls, output, concurrency, depth, timeout,
         click.echo(click.style("    TLS certificate verification must remain enabled.\n", fg='yellow'))
         sys.exit(1)
 
+    # Build Authoritative EffectivePolicy
+    cli_overrides = {
+        "concurrency": cfg.concurrency,
+        "depth": cfg.depth,
+        "timeout": cfg.timeout,
+        "max_rps": cfg.max_requests_per_second,
+        "verify_tls": cfg.verify_tls,
+        "strict_scope": cfg.strict_scope,
+        "allowed_domains": cfg.allowed_domains,
+        "excluded_domains": cfg.excluded_domains,
+        "header_name": cfg.header_name,
+        "header_value": cfg.header_value,
+        "template": cfg.default_template,
+        "reporter": cfg.reporter_name,
+        "reporter_email": cfg.reporter_email,
+        "validate_keys": cfg.validate_keys
+    }
+
+    try:
+        effective_policy = EffectivePolicy.build(
+            profile=active_profile,
+            config=cfg,
+            cli_overrides=cli_overrides
+        )
+    except ValueError as val_err:
+        click.echo(click.style(f"\n[!] POLICY ERROR: {val_err}\n", fg='red', bold=True))
+        sys.exit(1)
+
     # Validate target presence
     if not any([target, target_list, urls, offline]):
         click.echo(click.style("┌─────────────────────────────────────────────────────────────┐", fg='red'))
@@ -285,31 +281,31 @@ def main(ctx, target, target_list, urls, output, concurrency, depth, timeout,
             use_archives = True
 
     # Scope validation on single target
-    scope_mgr = ScopeManager.from_profile(active_profile) if active_profile else cfg.get_scope_manager()
+    scope_mgr = effective_policy.scope_manager
     if target and scope_mgr.enabled:
         host = scope_mgr.extract_hostname(target)
         if host and not scope_mgr.is_host_allowed(host):
             click.echo(click.style(f"\n[!] ERROR: Target '{target}' is OUT OF SCOPE!", fg='red', bold=True))
-            click.echo(click.style(f"    Allowed domains: {', '.join(cfg.allowed_domains)}", fg='yellow'))
-            click.echo(click.style(f"    Excluded domains: {', '.join(cfg.excluded_domains)}", fg='yellow'))
+            click.echo(click.style(f"    Allowed domains: {', '.join(scope_mgr.allowed_domains)}", fg='yellow'))
+            click.echo(click.style(f"    Excluded domains: {', '.join(scope_mgr.excluded_domains)}", fg='yellow'))
             click.echo(click.style("[!] Aborting to ensure bug bounty compliance.\n", fg='red'))
             return
 
     # Key validation safety check
-    if cfg.validate_keys and not quiet:
+    if effective_policy.validate_keys and not quiet:
         keyhacks_validator = KeyHacksValidator(timeout=validate_timeout)
         keyhacks_validator.print_disclaimer()
         if not click.confirm(click.style('[?] Do you confirm you have explicit authorization to validate these secrets?', fg='yellow'), default=False):
             click.echo(click.style("[!] Key validation cancelled. Running passive recon only.", fg='yellow'))
-            cfg.validate_keys = False
+            effective_policy.validate_keys = False
 
     # Instantiate managers
     header_mgr = cfg.get_header_manager()
-    rate_limiter = cfg.get_rate_limiter()
+    rate_limiter = effective_policy.request_policy_manager.global_limiter
 
     # Display configuration summary with sensitive values masked
     if not quiet:
-        prog_display = active_profile.name if active_profile else "Custom Target Profile"
+        prog_display = f"{effective_policy.program_name} ({effective_policy.program_id})"
         click.echo()
         click.echo(click.style("┌─────────────────────────────────────────────────────────────┐", fg='green'))
         click.echo(click.style("│               🦇  SCAN CONFIGURATION SUMMARY                │", fg='green'))
@@ -317,15 +313,15 @@ def main(ctx, target, target_list, urls, output, concurrency, depth, timeout,
         click.echo(click.style(f"│  Active Program: {prog_display[:42]:<43}│", fg='green'))
         click.echo(click.style(f"│  Target: {str(target or target_list or urls or offline)[:50]:<51}│", fg='green'))
         click.echo(click.style(f"│  Mode: {(mode or 'main').upper():<53}│", fg='green'))
-        click.echo(click.style(f"│  Allowed Scope: {', '.join(cfg.allowed_domains)[:43]:<44}│", fg='green'))
-        click.echo(click.style(f"│  Excluded Scope: {', '.join(cfg.excluded_domains)[:42]:<43}│", fg='green'))
-        click.echo(click.style(f"│  Rate Limit: {f'{cfg.max_requests_per_second} requests/second':<47}│", fg='green'))
-        click.echo(click.style(f"│  Concurrency: {cfg.concurrency:<46}│", fg='green'))
-        click.echo(click.style(f"│  TLS Verification: {'Enabled (Strict)' if cfg.verify_tls else 'Disabled':<41}│", fg='green'))
+        click.echo(click.style(f"│  Allowed Scope: {', '.join(scope_mgr.allowed_domains)[:43]:<44}│", fg='green'))
+        click.echo(click.style(f"│  Excluded Scope: {', '.join(scope_mgr.excluded_domains)[:42]:<43}│", fg='green'))
+        click.echo(click.style(f"│  Rate Limit: {f'{effective_policy.max_rps} requests/second':<47}│", fg='green'))
+        click.echo(click.style(f"│  Concurrency: {effective_policy.concurrency:<46}│", fg='green'))
+        click.echo(click.style(f"│  TLS Verification: {'Enabled (Strict)' if effective_policy.verify_tls else 'Disabled':<41}│", fg='green'))
         hdr_display = f"{cfg.header_name}: {header_mgr.get_masked_value()}" if header_mgr.is_active() else "Disabled"
         click.echo(click.style(f"│  Researcher Header: {hdr_display:<40}│", fg='green'))
-        click.echo(click.style(f"│  Key Validation: {'Enabled' if cfg.validate_keys else 'Disabled (Safe by default)':<43}│", fg='green'))
-        click.echo(click.style(f"│  Report Template: {cfg.default_template.upper():<42}│", fg='green'))
+        click.echo(click.style(f"│  Key Validation: {'Enabled' if effective_policy.validate_keys else 'Disabled (Safe by default)':<43}│", fg='green'))
+        click.echo(click.style(f"│  Report Template: {effective_policy.default_template.upper():<42}│", fg='green'))
         click.echo(click.style("└─────────────────────────────────────────────────────────────┘", fg='green'))
         click.echo()
 
@@ -335,29 +331,36 @@ def main(ctx, target, target_list, urls, output, concurrency, depth, timeout,
             click.echo(click.style("[!] Reconnaissance cancelled by user.", fg="yellow"))
             return
 
-    # Initialize Scanner
+    # Initialize Scanner with Authoritative EffectivePolicy
     scanner = NightCrawlerScanner(
-        concurrency=cfg.concurrency,
-        timeout=cfg.timeout,
-        depth=cfg.depth,
+        concurrency=effective_policy.concurrency,
+        timeout=effective_policy.timeout,
+        depth=effective_policy.crawl_depth,
         use_external_tools=use_subdomains or use_archives,
         custom_patterns=patterns,
         verbose=verbose,
         validate=True,
-        scope_manager=scope_mgr,
+        scope_manager=effective_policy.scope_manager,
         rate_limiter=rate_limiter,
         header_manager=header_mgr,
-        max_requests_per_second=cfg.max_requests_per_second,
-        verify_tls=cfg.verify_tls,
-        strict_scope=cfg.strict_scope,
-        javascript_extraction=cfg.javascript_extraction,
-        endpoint_discovery=cfg.endpoint_discovery,
-        secret_detection=cfg.secret_detection,
-        validate_keys=cfg.validate_keys,
-        profile=active_profile
+        max_requests_per_second=effective_policy.max_rps,
+        verify_tls=effective_policy.verify_tls,
+        strict_scope=effective_policy.strict_scope,
+        javascript_extraction=effective_policy.permission_manager.is_permitted("javascript_analysis"),
+        endpoint_discovery=effective_policy.permission_manager.is_permitted("endpoint_discovery"),
+        secret_detection=effective_policy.permission_manager.is_permitted("secret_detection"),
+        validate_keys=effective_policy.validate_keys,
+        profile=active_profile,
+        auth_manager=effective_policy.auth_manager,
+        permission_manager=effective_policy.permission_manager,
+        tool_compatibility_manager=effective_policy.tool_compatibility_manager,
+        audit_logger=effective_policy.audit_logger,
+        request_policy_manager=effective_policy.request_policy_manager,
+        effective_policy=effective_policy
     )
 
     try:
+        effective_policy.validate_ready_to_scan()
         if offline:
             asyncio.run(scanner.scan_directory(Path(offline)))
         elif urls:
@@ -367,32 +370,15 @@ def main(ctx, target, target_list, urls, output, concurrency, depth, timeout,
         else:
             asyncio.run(scanner.scan_target(target))
 
-        # KeyHacks Validation phase (only if explicitly enabled)
-        if cfg.validate_keys and scanner.results.findings:
-            click.echo()
-            click.echo(click.style("┌─────────────────────────────────────────────────────────────┐", fg='yellow'))
-            click.echo(click.style("│               🔑  KEYHACKS VALIDATION                       │", fg='yellow'))
-            click.echo(click.style("└─────────────────────────────────────────────────────────────┘", fg='yellow'))
-            keyhacks_validator = KeyHacksValidator(timeout=validate_timeout)
-            with click.progressbar(scanner.results.findings, label=click.style('  🔑 Validating', fg='cyan')) as findings:
-                for finding in findings:
-                    if finding.validated:
-                        res = asyncio.run(keyhacks_validator.validate_secret(finding.pattern_name, finding.matched_value))
-                        finding.keyhacks_status = res.status.value
-                        finding.keyhacks_message = res.message
-                        finding.keyhacks_command = res.validation_command or ""
-                        if res.status == ValidationStatus.VALID:
-                            finding.credential_verified = True
-                            scanner.results.keyhacks_valid += 1
-                        elif res.status == ValidationStatus.INVALID:
-                            finding.credential_verified = False
-                            scanner.results.keyhacks_invalid += 1
-
         # Report Generation
-        default_out = output or f"report_{str(target or 'recon').replace('.', '_')}.{cfg.default_format}"
+        default_out = output or f"report_{str(target or 'recon').replace('.', '_')}.{effective_policy.default_format}"
         output_path = Path(default_out)
 
-        rep_manager = ReportManager(profile=active_profile, reporter_name=cfg.reporter_name)
+        rep_manager = ReportManager(
+            profile=active_profile,
+            policy=effective_policy,
+            reporter_name=effective_policy.reporter_name
+        )
         valid_findings = [f for f in scanner.results.findings if f.validated]
 
         tools_status = scanner.tool_compatibility_manager.get_tool_audit_report() if scanner.tool_compatibility_manager else {}

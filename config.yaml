@@ -5,11 +5,15 @@ scope:
   enabled: true
   allowed_domains:
     - uxcam.com
+    - "*.uxcam.com"
     - uxc.am
+    - "*.uxc.am"
 
   excluded_domains:
     - tara.uxcam.com
+    - "*.tara.uxcam.com"
     - connect.uxcam.com
+    - "*.connect.uxcam.com"
 
 researcher:
   custom_header_enabled: true

@@ -55,11 +55,14 @@ NightCrawler v5.0 is a modular bug bounty reconnaissance framework. Rather than 
 flowchart TD
     Profile[Program Profile YAML/JSON] --> PM[ProgramManager]
     PM --> PolicyVal[PolicyValidator]
-    PolicyVal --> SM[ScopeManager\n(Domains, IPs, CIDRs, Paths)]
-    PolicyVal --> RPM[RequestPolicyManager\n(Global & Per-Host Rate Limits)]
-    PolicyVal --> AM[AuthenticationManager\n(Headers, Bearer, Cookies, Isolation)]
-    PolicyVal --> TPM[TestingPermissionManager\n(Passive/Active Safety Rules)]
-    PolicyVal --> TCM[ToolCompatibilityManager\n(Capability Matrix)]
+    PolicyVal --> CLI[CLI Options & Overrides]
+    CLI --> EffPol[EffectivePolicy\n(Single Authoritative Source of Truth)]
+    
+    EffPol --> SM[ScopeManager\n(Exact & Wildcard Domains, CIDRs, Paths)]
+    EffPol --> RPM[RequestPolicyManager\n(Global & Per-Host Rate Limits)]
+    EffPol --> AM[AuthenticationManager\n(Headers, Bearer, Cookies, Isolation)]
+    EffPol --> TPM[TestingPermissionManager\n(Safety Ceilings)]
+    EffPol --> TCM[ToolCompatibilityManager\n(Capability Matrix)]
     
     SM & RPM & AM --> Client[NightCrawlerHttpClient\n(Hop-by-Hop Redirect Checks & Token Pacing)]
     Client --> Audit[AuditLogger\n(Structured JSONL Logs with Redaction)]
@@ -236,12 +239,29 @@ reporting:
 
 NightCrawler's `ScopeManager` enforces comprehensive boundaries:
 
-- **Hostname & Apex Matching**: Strict suffix-boundary checks prevent lookalike bypasses (`eviluxcam.com` and `uxcam.com.attacker.com` are rejected).
-- **Wildcard Subdomains**: `*.example.com` matches `app.example.com` and `api.v1.example.com`.
+- **Exact Hostname Matching**: An entry like `example.com` matches **only** the bare apex hostname `example.com`. It does **not** match subdomains unless explicitly paired with a wildcard.
+- **Wildcard Subdomains**: An entry like `*.example.com` matches all subdomains (e.g., `app.example.com`, `api.v1.example.com`). It does **not** match the bare apex unless `example.com` is also listed.
+- **Suffix-Boundary Lookalike Protection**: Strict DNS label checks ensure that lookalike domains (`evil-example.com`, `notexample.com`, `example.com.attacker.com`) are mathematically impossible to match.
+- **Exclusions Override Inclusions**: Excluded domains (e.g., `tara.uxcam.com`) reject both the host and all its subdomains (`*.tara.uxcam.com`), even if a parent wildcard was allowed.
 - **IP & CIDR Ranges**: Validates targets against allowed CIDRs (`10.0.0.0/24`) while respecting excluded subnets (`10.0.0.128/25`) and specific IPs (`10.0.0.254`).
 - **Path Restrictions**: Prohibits scanning dangerous or state-changing paths (e.g. `/logout`, `/delete-account`).
 - **Third-Party Hosted Services**: First-party subdomains hosted on external SaaS (e.g. Zendesk on `help.uxcam.com`, Medium on `blog.uxcam.com`) are explicitly excluded.
 - **Fail-Closed Principle**: If scope is ambiguous, the asset is skipped. Exclusions always override inclusions.
+
+---
+
+## 🔄 Migration Guide (From UXCam-Only Configuration)
+
+NightCrawler v5.0 transitions from a hardcoded single-target engine to a multi-program framework:
+
+1. **Dedicated Program Profiles**: Target policies now reside in `programs/<program_id>/program.yaml`. The UXCam program is preserved in `programs/uxcam/program.yaml`.
+2. **Backwards Compatibility**: Existing `config.yaml` files continue to load as fallback defaults. If you have customized `config.yaml`, NightCrawler merges its parameters into an active `custom-target` profile without data loss.
+3. **Automatic Backup**: Backups of legacy configuration files are preserved before any programmatic overwrite.
+4. **Selecting Profiles**: Simply pass `--program <id>` or select option `[1]` in `python3 run.py`:
+   ```bash
+   python3 main.py --program uxcam -t uxcam.com
+   ```
+5. **Exact vs. Wildcard Upgrades**: When migrating domain lists, specify both `domain.com` (for apex) and `*.domain.com` (for subdomains) to ensure comprehensive reconnaissance coverage.
 
 ---
 
@@ -385,7 +405,7 @@ python3 -m pytest tests/ -v
 ```
 
 ```
-============================== 52 passed in 3.65s ==============================
+============================== 59 passed in 3.92s ==============================
 ```
 
 ---

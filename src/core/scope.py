@@ -34,19 +34,40 @@ class ScopeManager:
         third_party_hosted_exclusions: Optional[Iterable[str]] = None
     ):
         self.enabled = enabled
+        self.exact_domains: Set[str] = set()
+        self.wildcard_domains: Set[str] = set()
         self.allowed_domains: Set[str] = set()
-        self.excluded_domains: Set[str] = set()
 
         if allowed_domains:
             for domain in allowed_domains:
-                clean = self._normalize_domain(domain)
+                d = str(domain).strip().lower()
+                if not d:
+                    continue
+                is_wildcard = d.startswith("*.") or d.startswith(".")
+                clean = self._normalize_domain(d)
                 if clean:
+                    if is_wildcard:
+                        self.wildcard_domains.add(clean)
+                    else:
+                        self.exact_domains.add(clean)
                     self.allowed_domains.add(clean)
+
+        self.excluded_exact_domains: Set[str] = set()
+        self.excluded_wildcard_domains: Set[str] = set()
+        self.excluded_domains: Set[str] = set()
 
         if excluded_domains:
             for domain in excluded_domains:
-                clean = self._normalize_domain(domain)
+                d = str(domain).strip().lower()
+                if not d:
+                    continue
+                is_wildcard = d.startswith("*.") or d.startswith(".")
+                clean = self._normalize_domain(d)
                 if clean:
+                    if is_wildcard:
+                        self.excluded_wildcard_domains.add(clean)
+                    else:
+                        self.excluded_exact_domains.add(clean)
                     self.excluded_domains.add(clean)
 
         # IP & CIDR handling
@@ -119,7 +140,7 @@ class ScopeManager:
 
     @staticmethod
     def _normalize_domain(domain: str) -> str:
-        """Normalize domain string by stripping wildcards, schemes, ports, and whitespace."""
+        """Normalize domain string by stripping wildcards, schemes, ports, and whitespace with IDNA handling."""
         if not domain:
             return ""
         domain = domain.strip().lower()
@@ -132,7 +153,13 @@ class ScopeManager:
             domain = domain[1:]
         if ":" in domain:
             domain = domain.split(":")[0]
-        return domain.rstrip(".")
+        domain = domain.rstrip(".")
+        try:
+            import idna
+            domain = idna.encode(domain).decode("ascii")
+        except Exception:
+            pass
+        return domain
 
     @staticmethod
     def extract_hostname(target_or_url: str) -> Optional[str]:
@@ -210,7 +237,12 @@ class ScopeManager:
         return False
 
     def is_host_allowed(self, host: Optional[str]) -> bool:
-        """Check if hostname or IP is in allowed scope and not excluded."""
+        """
+        Check if hostname or IP is in allowed scope and not excluded.
+        Exact and wildcard domains are stored and checked separately:
+        - example.com matches only apex example.com
+        - *.example.com matches subdomains of example.com (e.g. app.example.com)
+        """
         if not self.enabled:
             return True
 
@@ -218,6 +250,11 @@ class ScopeManager:
             return False
 
         host = host.lower().rstrip(".")
+        try:
+            import idna
+            host = idna.encode(host).decode("ascii")
+        except Exception:
+            pass
 
         # Check if host is an IP address
         try:
@@ -226,23 +263,27 @@ class ScopeManager:
         except ValueError:
             pass
 
-        # Check third-party hosted service exclusions
+        # Check third-party hosted service exclusions (exact host or any subdomains)
         for tp in self.third_party_hosted_exclusions:
-            if self._matches_domain_pattern(host, tp):
+            if host == tp or host.endswith("." + tp):
                 return False
 
         # Explicit exclusions override allowed domains (including all subdomains)
         for excluded in self.excluded_domains:
-            if self._matches_domain_pattern(host, excluded):
+            if host == excluded or host.endswith("." + excluded):
                 return False
 
         # If no allowed domains/IPs/CIDRs configured, nothing is allowed when scope is enabled
-        if not self.allowed_domains and not self.allowed_ips and not self.allowed_cidrs:
+        if not self.exact_domains and not self.wildcard_domains and not self.allowed_ips and not self.allowed_cidrs:
             return False
 
-        # Check if matches any allowed domain (exact or subdomain)
-        for allowed in self.allowed_domains:
-            if self._matches_domain_pattern(host, allowed):
+        # 1. Exact match check (apex domain or exact host)
+        if host in self.exact_domains:
+            return True
+
+        # 2. Wildcard match check (proper subdomain with dot boundary)
+        for w in self.wildcard_domains:
+            if host.endswith("." + w):
                 return True
 
         return False
