@@ -1,0 +1,183 @@
+"""
+NightCrawler - Authentication & Credential Manager Module
+Safely manages HTTP headers, Bearer tokens, API keys, cookies, and Basic Auth.
+Enforces credential isolation: credentials are never sent to out-of-scope hosts,
+third-party services, or leaked into logs or process tables.
+"""
+
+import os
+import base64
+from pathlib import Path
+from typing import Dict, Optional, Any
+from urllib.parse import urlparse
+
+from src.core.program_profile import AuthenticationDefinition, ProgramProfile
+from src.core.scope import ScopeManager
+
+
+class AuthenticationManager:
+    """
+    Manages program authentication tokens and headers.
+    Strictly prevents credential forwarding to out-of-scope hosts and archives.
+    """
+
+    def __init__(
+        self,
+        auth_def: Optional[AuthenticationDefinition] = None,
+        required_headers: Optional[Dict[str, str]] = None,
+        optional_headers: Optional[Dict[str, str]] = None,
+        scope_manager: Optional[ScopeManager] = None
+    ):
+        self.auth_def = auth_def or AuthenticationDefinition()
+        self.required_headers = required_headers or {}
+        self.optional_headers = optional_headers or {}
+        self.scope_manager = scope_manager
+
+        # Resolved credentials in memory
+        self._auth_header_name: Optional[str] = None
+        self._auth_header_value: Optional[str] = None
+        self._cookie_header_value: Optional[str] = None
+        self._custom_headers: Dict[str, str] = {}
+
+        self._initialize_credentials()
+
+    @classmethod
+    def from_profile(cls, profile: ProgramProfile, scope_manager: Optional[ScopeManager] = None) -> "AuthenticationManager":
+        req_headers = profile.resolve_headers()
+        opt_headers = profile.headers.get("optional", {})
+        return cls(
+            auth_def=profile.authentication,
+            required_headers=req_headers,
+            optional_headers=opt_headers,
+            scope_manager=scope_manager
+        )
+
+    def _initialize_credentials(self):
+        """Resolve and validate credentials from environment variables or secure session files."""
+        # 1. Custom Headers
+        for k, v in self.required_headers.items():
+            val = str(v).strip()
+            # If value wasn't expanded (e.g. env var missing)
+            if not val:
+                # Check if it was an env var name
+                env_key = k.upper().replace("-", "_")
+                val = os.getenv(env_key, "")
+            if not val:
+                raise ValueError(f"Required header '{k}' has no value provided and environment variable is not set.")
+            self._custom_headers[k] = val
+
+        for k, v in self.optional_headers.items():
+            if v:
+                self._custom_headers[k] = str(v).strip()
+
+        # 2. Authentication Type
+        auth_type = self.auth_def.type.lower()
+        if auth_type == "none":
+            return
+
+        if auth_type == "bearer":
+            token_env = self.auth_def.token_env or "PROGRAM_ACCESS_TOKEN"
+            token = os.getenv(token_env)
+            if not token and self.auth_def.session_file:
+                token = self._read_session_file(self.auth_def.session_file)
+            if not token:
+                raise ValueError(f"Missing required Bearer token in environment variable '{token_env}'.")
+            header_name = self.auth_def.header_name or "Authorization"
+            prefix = self.auth_def.header_prefix or "Bearer "
+            self._auth_header_name = header_name
+            self._auth_header_value = f"{prefix}{token.strip()}"
+
+        elif auth_type == "api_key":
+            key_env = self.auth_def.token_env or "PROGRAM_API_KEY"
+            key = os.getenv(key_env)
+            if not key:
+                raise ValueError(f"Missing required API key in environment variable '{key_env}'.")
+            header_name = self.auth_def.header_name or "X-API-Key"
+            prefix = self.auth_def.header_prefix or ""
+            self._auth_header_name = header_name
+            self._auth_header_value = f"{prefix}{key.strip()}"
+
+        elif auth_type == "cookie":
+            cookie_env = self.auth_def.cookie_env or "PROGRAM_SESSION_COOKIE"
+            cookie = os.getenv(cookie_env)
+            if not cookie and self.auth_def.session_file:
+                cookie = self._read_session_file(self.auth_def.session_file)
+            if not cookie:
+                raise ValueError(f"Missing required session cookie in environment variable '{cookie_env}'.")
+            self._cookie_header_value = cookie.strip()
+
+        elif auth_type == "basic":
+            user_env = self.auth_def.username_env or "PROGRAM_BASIC_USER"
+            pass_env = self.auth_def.password_env or "PROGRAM_BASIC_PASS"
+            user = os.getenv(user_env, "")
+            pwd = os.getenv(pass_env, "")
+            if not user or not pwd:
+                raise ValueError(f"Missing Basic Auth credentials in environment variables '{user_env}'/'{pass_env}'.")
+            creds = base64.b64encode(f"{user}:{pwd}".encode()).decode()
+            self._auth_header_name = "Authorization"
+            self._auth_header_value = f"Basic {creds}"
+
+    def _read_session_file(self, file_path_str: str) -> str:
+        """Safely read session file, verifying strict permissions (0600)."""
+        p = Path(file_path_str)
+        if not p.exists():
+            raise FileNotFoundError(f"Session file '{p}' does not exist.")
+
+        # Check permissions: must not be group/world readable (mode & 0o077 == 0)
+        mode = p.stat().st_mode
+        if mode & 0o077:
+            raise PermissionError(
+                f"Session file '{p}' has insecure permissions ({oct(mode)}). "
+                "File permissions must be 0600 (owner read/write only)."
+            )
+
+        return p.read_text(encoding="utf-8").strip()
+
+    def get_headers_for_url(
+        self,
+        url: str,
+        scope_manager: Optional[ScopeManager] = None,
+        base_headers: Optional[Dict[str, str]] = None
+    ) -> Dict[str, str]:
+        """
+        Build headers for a request destination.
+        CRITICAL: If the URL is out of scope or third-party, NO authentication
+        or program-specific headers are attached!
+        """
+        headers = dict(base_headers or {})
+
+        # Default User-Agent if not set
+        if "User-Agent" not in headers:
+            headers["User-Agent"] = "NightCrawler-BugBounty-Recon/5.0"
+
+        sc = scope_manager or self.scope_manager
+        # If scope is active and destination is out of scope, NEVER attach credentials
+        if sc and sc.enabled:
+            if not sc.is_url_in_scope(url):
+                return headers
+
+        # Target is authorized and in-scope: safely attach program headers & credentials
+        for k, v in self._custom_headers.items():
+            headers[k] = v
+
+        if self._auth_header_name and self._auth_header_value:
+            headers[self._auth_header_name] = self._auth_header_value
+
+        if self._cookie_header_value:
+            existing_cookie = headers.get("Cookie", "")
+            if existing_cookie:
+                headers["Cookie"] = f"{existing_cookie}; {self._cookie_header_value}"
+            else:
+                headers["Cookie"] = self._cookie_header_value
+
+        return headers
+
+    @staticmethod
+    def mask_secret(secret: str) -> str:
+        """Mask a sensitive token or password."""
+        if not secret:
+            return "(empty)"
+        s = secret.strip()
+        if len(s) <= 4:
+            return "****"
+        return f"{s[:2]}****{s[-2:]}"

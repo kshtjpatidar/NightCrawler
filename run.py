@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-NightCrawler v5.0 - Interactive Bug Bounty Reconnaissance Interface
-Full interactive configuration menu complying with bug bounty rules.
+NightCrawler v5.0 - Multi-Program, Policy-Aware Bug Bounty Reconnaissance Interface
+Interactive terminal control center for managing programs, policies, scope, authentication,
+reconnaissance modules, audit logs, and compliance reporting.
 by kshtjpatidar | Keep Learning // Keep Hacking
 """
 
@@ -10,6 +11,7 @@ import sys
 import shutil
 import subprocess
 import time
+import json
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -28,128 +30,145 @@ except ImportError:
     from rich.table import Table
     from rich.prompt import Prompt, Confirm, IntPrompt, FloatPrompt
 
-from src.core.request_config import load_config, NightCrawlerConfig
-from src.core.header_manager import HeaderManager
+from src.core.program_manager import ProgramManager
+from src.core.program_profile import ProgramProfile, PolicyValidator, PolicyParser
+from src.core.scope import ScopeManager
+from src.core.auth_manager import AuthenticationManager
+from src.core.permissions import TestingPermissionManager
+from src.core.tool_compatibility import ToolCompatibilityManager
+from src.core.audit_logger import AuditLogger
 
 console = Console()
 
-BANNER = """
-[bold green]
+BANNER = """[bold green]
 ███╗   ██╗██╗ ██████╗ ██╗  ██╗████████╗ ██████╗██████╗  █████╗ ██╗    ██╗██╗     ███████╗██████╗ 
 ████╗  ██║██║██╔════╝ ██║  ██║╚══██╔══╝██╔════╝██╔══██╗██╔══██╗██║    ██║██║     ██╔════╝██╔══██╗
 ██╔██╗ ██║██║██║  ███╗███████║   ██║   ██║     ██████╔╝███████║██║ █╗ ██║██║     █████╗  ██████╔╝
 ██║╚██╗██║██║██║   ██║██╔══██║   ██║   ██║     ██╔══██╗██╔══██║██║███╗██║██║     ██╔══╝  ██╔══██╗
 ██║ ╚████║██║╚██████╔╝██║  ██║   ██║   ╚██████╗██║  ██║██║  ██║╚███╔███╔╝███████╗███████╗██║  ██║
 ╚═╝  ╚═══╝╚═╝ ╚═════╝ ╚═╝  ╚═╝   ╚═╝    ╚═════╝╚═╝  ╚═╝╚═╝  ╚═╝ ╚══╝╚══╝ ╚══════╝╚══════╝╚═╝  ╚═╝
-[/bold green]
-"""
+[/bold green]"""
 
 
 def clear_screen():
     os.system('clear' if os.name != 'nt' else 'cls')
 
 
-def print_banner():
+def print_banner(active_prog_name: str = "UXCam", active_rps: float = 5.0):
     clear_screen()
     console.print(BANNER)
     
     info = Text()
-    info.append("v5.0 Bug Bounty Edition", style="bold green")
+    info.append("v5.0 Multi-Program Framework", style="bold green")
     info.append(" │ ", style="dim")
-    info.append("Max 5 RPS", style="bold cyan")
+    info.append(f"Program: {active_prog_name}", style="bold magenta")
     info.append(" │ ", style="dim")
-    info.append("Scope Enforced", style="bold yellow")
+    info.append(f"Max {active_rps} RPS", style="bold cyan")
     info.append(" │ ", style="dim")
-    info.append("Verified TLS", style="bold green")
+    info.append("Policy-Aware Scope", style="bold yellow")
     info.append(" │ ", style="dim")
-    info.append("Bugcrowd Reports", style="bold magenta")
+    info.append("Audit Logging Active", style="bold green")
     console.print(Panel(info, border_style="green"))
     console.print("[dim]⚠️  Ethical Bug Bounty Reconnaissance Only • Keep Learning // Keep Hacking[/dim]\n")
 
 
-def display_menu():
-    """Display the 12-item interactive configuration menu"""
-    table = Table(title="[bold cyan]🎯 NightCrawler Configuration & Control Menu[/]", show_header=True, header_style="bold cyan", border_style="cyan")
+def display_main_menu(active_profile: ProgramProfile):
+    """Display the 14-item interactive control menu"""
+    table = Table(
+        title=f"[bold cyan]🎯 NightCrawler Control Center — Active Program: [magenta]{active_profile.name} ({active_profile.id})[/][/]",
+        show_header=True,
+        header_style="bold cyan",
+        border_style="cyan"
+    )
     table.add_column("Option", style="bold green", width=8, justify="center")
-    table.add_column("Configuration Task", style="white", width=42)
-    table.add_column("Status / Current Value", style="yellow", width=28)
+    table.add_column("Management & Recon Operation", style="white", width=42)
+    table.add_column("Status / Setting", style="yellow", width=28)
+
+    table.add_row("[1]", "Select program", f"{active_profile.name} ({active_profile.id})")
+    table.add_row("[2]", "List programs", "View all program profiles")
+    table.add_row("[3]", "Create program profile", "Add new program profile")
+    table.add_row("[4]", "Import policy", "YAML / JSON / Text import")
+    table.add_row("[5]", "Validate program policy", "Run compliance & safety checks")
+    table.add_row("[6]", "View program scope", f"{len(active_profile.scope.allowed_domains)} allowed, {len(active_profile.scope.excluded_domains)} excluded")
+    table.add_row("[7]", "Configure authentication", f"Auth type: {active_profile.authentication.type.upper()}")
+    table.add_row("[8]", "Configure request limits", f"{active_profile.request_policy.max_rps} RPS (Concurrency: {active_profile.request_policy.concurrency})")
+    table.add_row("[9]", "Select reconnaissance modules", "Configure active / passive tools")
+    table.add_row("[10]", "Start reconnaissance", "[bold green]🚀 Run Recon Scan[/]")
+    table.add_row("[11]", "View reports", "Open generated reports")
+    table.add_row("[12]", "View audit logs", "Inspect security audit trail")
+    table.add_row("[13]", "Run tests", "Execute automated test suite")
+    table.add_row("[14]", "Exit", "[dim]Quit NightCrawler[/]")
 
     return table
 
 
-def render_review_panel(cfg: NightCrawlerConfig, target: str):
-    """Render full configuration review with sensitive values strictly masked"""
-    hm = cfg.get_header_manager()
-    hdr_val = hm.get_masked_value() if hm.is_active() else "(disabled)"
+def run_scan_subprocess(target: str, profile_or_cfg):
+    """Execute main.py with the active program profile or config"""
+    if hasattr(profile_or_cfg, "name") and hasattr(profile_or_cfg, "id"):
+        # ProgramProfile
+        prog_name = profile_or_cfg.name
+        prog_id = profile_or_cfg.id
+        fmt = profile_or_cfg.reporting.default_format
+        cmd = [
+            sys.executable, "main.py",
+            "--program", prog_id,
+            "-t", target,
+            "--mode", "deep",
+            "--no-prompt",
+            "-o", f"report_{target.replace('.', '_')}.{fmt}"
+        ]
+        env = dict(os.environ)
+        # Populate env with researcher header if set
+        hdrs = profile_or_cfg.headers.get("required", {})
+        if "X-User-Id" in hdrs:
+            val = profile_or_cfg.resolve_headers().get("X-User-Id", "")
+            if val:
+                env["NIGHTCRAWLER_RESEARCHER_ID"] = val
+                env["NIGHTCRAWLER_HEADER_VALUE"] = val
+    else:
+        # NightCrawlerConfig
+        prog_name = getattr(profile_or_cfg, "program_name", "Bug Bounty Recon")
+        fmt = getattr(profile_or_cfg, "default_format", "html")
+        cmd = [
+            sys.executable, "main.py",
+            "-t", target,
+            "--mode", "deep",
+            "--no-prompt",
+            "--concurrency", str(profile_or_cfg.concurrency),
+            "--max-rps", str(profile_or_cfg.max_requests_per_second),
+            "--timeout", str(profile_or_cfg.timeout),
+            "--depth", str(profile_or_cfg.depth),
+            "--template", profile_or_cfg.default_template,
+            "-o", f"report_{target.replace('.', '_')}.{fmt}"
+        ]
+        for d in profile_or_cfg.allowed_domains:
+            cmd.extend(["--allowed-domain", d])
+        for ed in profile_or_cfg.excluded_domains:
+            cmd.extend(["--excluded-domain", ed])
 
-    table = Table(title="[bold cyan]📋 Configuration Review (Values Safely Masked)[/]", border_style="green", show_header=True)
-    table.add_column("Parameter", style="cyan", width=30)
-    table.add_column("Configured Setting", style="white", width=45)
+        env = dict(os.environ)
+        if profile_or_cfg.custom_header_enabled and profile_or_cfg.header_value:
+            cmd.extend(["--header-name", profile_or_cfg.header_name])
+            header_env_key = profile_or_cfg.header_value_env or "NIGHTCRAWLER_RESEARCHER_ID"
+            env[header_env_key] = profile_or_cfg.header_value
+            env["NIGHTCRAWLER_HEADER_VALUE"] = profile_or_cfg.header_value
+        else:
+            cmd.append("--disable-header")
 
-    table.add_row("1. Target Domain", target or "(Not configured)")
-    table.add_row("2. Allowed Scope", ", ".join(cfg.allowed_domains) or "None")
-    table.add_row("3. Excluded Domains", ", ".join(cfg.excluded_domains) or "None")
-    table.add_row("4. Researcher Header", f"{cfg.header_name}: {hdr_val}" if cfg.custom_header_enabled else "Disabled")
-    table.add_row("5. Max Requests Per Second", f"{cfg.max_requests_per_second} RPS")
-    table.add_row("6. Concurrency", str(cfg.concurrency))
-    table.add_row("7. JavaScript Extraction", "Enabled" if cfg.javascript_extraction else "Disabled")
-    table.add_row("8. Endpoint Discovery", "Enabled" if cfg.endpoint_discovery else "Disabled")
-    table.add_row("9. Secret Detection", "Enabled" if cfg.secret_detection else "Disabled")
-    table.add_row("10. Report Template & Format", f"{cfg.default_template.upper()} ({cfg.default_format.upper()})")
-    table.add_row("TLS Certificate Verification", "Enabled (Strict)" if cfg.verify_tls else "Disabled")
-    table.add_row("KeyHacks Validation", "Disabled (Safe by default)" if not cfg.validate_keys else "Enabled")
+        if profile_or_cfg.verify_tls:
+            cmd.append("--verify-tls")
+        else:
+            cmd.append("--no-verify-tls")
 
-    console.print()
-    console.print(table)
-    console.print()
+        if profile_or_cfg.strict_scope:
+            cmd.append("--strict-scope")
 
+        if profile_or_cfg.validate_keys:
+            cmd.append("--validate-keys")
 
-def run_scan_subprocess(target: str, cfg: NightCrawlerConfig):
-    """Execute main.py with the configured parameters"""
     console.print("\n[bold cyan]┌─────────────────────────────────────────────────────────────┐[/bold cyan]")
-    console.print("[bold cyan]│               🚀  STARTING BUG BOUNTY SCAN                  │[/bold cyan]")
+    console.print(f"[bold cyan]│   🚀  STARTING BUG BOUNTY SCAN: {prog_name[:25]:<26}│[/bold cyan]")
     console.print("[bold cyan]└─────────────────────────────────────────────────────────────┘[/bold cyan]\n")
-
-    cmd = [
-        sys.executable, "main.py",
-        "-t", target,
-        "--mode", "deep",
-        "--no-prompt",
-        "--concurrency", str(cfg.concurrency),
-        "--max-rps", str(cfg.max_requests_per_second),
-        "--timeout", str(cfg.timeout),
-        "--depth", str(cfg.depth),
-        "--template", cfg.default_template,
-        "-o", f"report_{target.replace('.', '_')}.{cfg.default_format}"
-    ]
-
-    for d in cfg.allowed_domains:
-        cmd.extend(["--allowed-domain", d])
-
-    for ed in cfg.excluded_domains:
-        cmd.extend(["--excluded-domain", ed])
-
-    env = dict(os.environ)
-    if cfg.custom_header_enabled and cfg.header_value:
-        cmd.extend(["--header-name", cfg.header_name])
-        # Pass sensitive header values strictly via subprocess environment rather than CLI arguments
-        header_env_key = cfg.header_value_env or "NIGHTCRAWLER_RESEARCHER_ID"
-        env[header_env_key] = cfg.header_value
-        env["NIGHTCRAWLER_HEADER_VALUE"] = cfg.header_value
-    else:
-        cmd.append("--disable-header")
-
-    if cfg.verify_tls:
-        cmd.append("--verify-tls")
-    else:
-        cmd.append("--no-verify-tls")
-
-    if cfg.strict_scope:
-        cmd.append("--strict-scope")
-
-    if cfg.validate_keys:
-        cmd.append("--validate-keys")
-
     console.print(f"[dim]Command: {' '.join(cmd)}[/dim]\n")
 
     try:
@@ -157,7 +176,7 @@ def run_scan_subprocess(target: str, cfg: NightCrawlerConfig):
         if result.returncode == 0:
             console.print("\n[bold green]✓ Reconnaissance completed successfully![/bold green]")
         else:
-            console.print("\n[yellow]⚠️  Scan finished with exit code: " + str(result.returncode) + "[/yellow]")
+            console.print(f"\n[yellow]⚠️  Scan finished with exit code: {result.returncode}[/yellow]")
     except KeyboardInterrupt:
         console.print("\n[yellow]⚠️  Scan interrupted by user.[/yellow]")
     except Exception as e:
@@ -166,122 +185,207 @@ def run_scan_subprocess(target: str, cfg: NightCrawlerConfig):
 
 def main():
     try:
-        print_banner()
-        cfg = load_config()
+        pm = ProgramManager()
+        # Default profile: UXCam if present, else first available
+        active_profile = pm.get_profile("uxcam")
+        if not active_profile:
+            all_profs = pm.list_profiles()
+            if all_profs:
+                active_profile = pm.get_profile(all_profs[0]["id"])
+            else:
+                active_profile = pm.create_profile({"id": "uxcam", "name": "UXCam Bug Bounty Program"})
+
         target = "uxcam.com"
 
         while True:
-            hm = cfg.get_header_manager()
-            hdr_display = hm.get_masked_value() if hm.is_active() else "Disabled"
-
-            table = display_menu()
-            table.add_row("[1]", "Configure target", target)
-            table.add_row("[2]", "Configure allowed scope", f"{len(cfg.allowed_domains)} domains: {', '.join(cfg.allowed_domains)[:20]}")
-            table.add_row("[3]", "Configure excluded domains", f"{len(cfg.excluded_domains)} domains: {', '.join(cfg.excluded_domains)[:20]}")
-            table.add_row("[4]", "Configure researcher header", f"{cfg.header_name}: {hdr_display}")
-            table.add_row("[5]", "Configure max requests/sec", f"{cfg.max_requests_per_second} RPS")
-            table.add_row("[6]", "Configure concurrency", str(cfg.concurrency))
-            table.add_row("[7]", "Toggle JavaScript extraction", "Enabled" if cfg.javascript_extraction else "Disabled")
-            table.add_row("[8]", "Toggle endpoint discovery", "Enabled" if cfg.endpoint_discovery else "Disabled")
-            table.add_row("[9]", "Toggle secret detection", "Enabled" if cfg.secret_detection else "Disabled")
-            table.add_row("[10]", "Configure report format", f"{cfg.default_template.upper()} ({cfg.default_format.upper()})")
-            table.add_row("[11]", "Review configuration summary", "[cyan]View Masked Summary[/]")
-            table.add_row("[12]", "Start reconnaissance", "[bold green]🚀 Run Recon Scan[/]")
-            table.add_row("[0]", "Exit NightCrawler", "[dim]Quit[/]")
-
+            print_banner(active_profile.name, active_profile.request_policy.max_rps)
+            table = display_main_menu(active_profile)
             console.print(table)
             console.print()
 
-            choice = Prompt.ask("[bold white]Select an option [0-12][/bold white]", default="12")
+            choice = Prompt.ask("[bold white]Select an option [1-14][/bold white]", default="10")
 
             if choice == "1":
-                new_target = Prompt.ask("[bold cyan]Enter target domain[/]", default=target)
-                if new_target:
-                    target = new_target.strip().lower()
-                    console.print(f"[green]✓ Target set to: {target}[/]\n")
+                # Select program
+                profs = pm.list_profiles()
+                console.print("\n[bold cyan]Available Programs:[/]")
+                for idx, p in enumerate(profs, 1):
+                    console.print(f"  [{idx}] {p['id']} - {p['name']} ({p['max_rps']} RPS)")
+                p_idx = Prompt.ask("Select program number or enter ID", default="1")
+                if p_idx.isdigit() and 1 <= int(p_idx) <= len(profs):
+                    selected_id = profs[int(p_idx) - 1]["id"]
+                else:
+                    selected_id = p_idx.strip().lower()
+
+                loaded = pm.get_profile(selected_id)
+                if loaded:
+                    active_profile = loaded
+                    if active_profile.scope.allowed_domains:
+                        target = active_profile.scope.allowed_domains[0].lstrip("*.")
+                    console.print(f"[green]✓ Switched to program: {active_profile.name} ({active_profile.id})[/]\n")
+                else:
+                    console.print(f"[red]❌ Program '{selected_id}' not found.[/]\n")
+                time.sleep(1)
 
             elif choice == "2":
-                console.print(f"[dim]Current allowed domains: {', '.join(cfg.allowed_domains)}[/dim]")
-                domains_in = Prompt.ask("[bold cyan]Enter allowed domains (comma-separated)[/]", default=", ".join(cfg.allowed_domains))
-                cfg.allowed_domains = [d.strip().lower() for d in domains_in.split(",") if d.strip()]
-                console.print(f"[green]✓ Allowed scope updated: {', '.join(cfg.allowed_domains)}[/]\n")
+                # List programs
+                profs = pm.list_profiles()
+                t = Table(title="[bold cyan]All Configured Programs[/]", border_style="cyan")
+                t.add_column("ID", style="bold magenta")
+                t.add_column("Name", style="white")
+                t.add_column("Platform", style="cyan")
+                t.add_column("Max RPS", style="yellow")
+                t.add_column("Valid", style="green")
+                for p in profs:
+                    t.add_row(p["id"], p["name"], p["platform"], str(p["max_rps"]), "✓ Yes" if p["valid"] else "✗ No")
+                console.print()
+                console.print(t)
+                console.print()
+                Prompt.ask("Press Enter to continue", default="")
 
             elif choice == "3":
-                console.print(f"[dim]Current excluded domains: {', '.join(cfg.excluded_domains)}[/dim]")
-                domains_in = Prompt.ask("[bold cyan]Enter excluded domains (comma-separated)[/]", default=", ".join(cfg.excluded_domains))
-                cfg.excluded_domains = [d.strip().lower() for d in domains_in.split(",") if d.strip()]
-                console.print(f"[green]✓ Excluded domains updated: {', '.join(cfg.excluded_domains)}[/]\n")
+                # Create program profile
+                new_id = Prompt.ask("[bold cyan]Enter new program ID (alphanumeric, lowercase)[/]")
+                if new_id:
+                    new_name = Prompt.ask("[bold cyan]Enter program name[/]", default=new_id.title())
+                    domains_str = Prompt.ask("[bold cyan]Enter allowed domains (comma-separated)[/]", default=f"{new_id}.com")
+                    max_rps = FloatPrompt.ask("[bold cyan]Enter max requests per second (RPS)[/]", default=5.0)
+                    data = {
+                        "id": new_id.lower().strip(),
+                        "name": new_name,
+                        "scope": {"allowed_domains": [d.strip() for d in domains_str.split(",") if d.strip()]},
+                        "request_policy": {"max_rps": max_rps}
+                    }
+                    try:
+                        created = pm.create_profile(data, save=True)
+                        active_profile = created
+                        console.print(f"[green]✓ Created and activated profile '{created.id}'![/]\n")
+                    except Exception as e:
+                        console.print(f"[red]❌ Error creating profile: {e}[/]\n")
+                Prompt.ask("Press Enter to continue", default="")
 
             elif choice == "4":
-                cfg.custom_header_enabled = Confirm.ask("[bold cyan]Enable researcher identification header?[/]", default=cfg.custom_header_enabled)
-                if cfg.custom_header_enabled:
-                    cfg.header_name = Prompt.ask("Header Name", default=cfg.header_name)
-                    new_val = Prompt.ask("Header Value (e.g. researcher email)", default=cfg.header_value or "")
-                    if new_val:
-                        cfg.header_value = new_val
-                    console.print(f"[green]✓ Header configured: {cfg.header_name} (masked: {cfg.get_header_manager().get_masked_value()})[/]\n")
-                if Confirm.ask("Save this header configuration to config.yaml?", default=False):
-                    cfg.save_to_file()
-                    console.print("[green]✓ Configuration saved to config.yaml[/]\n")
+                # Import policy
+                source = Prompt.ask("[bold cyan]Enter path to YAML, JSON, or policy text file[/]")
+                if source:
+                    try:
+                        imported = pm.import_profile(source)
+                        active_profile = imported
+                        console.print(f"[green]✓ Imported program profile '{imported.id}' ({imported.name})![/]\n")
+                    except Exception as e:
+                        console.print(f"[red]❌ Error importing policy: {e}[/]\n")
+                Prompt.ask("Press Enter to continue", default="")
 
             elif choice == "5":
-                new_rps = FloatPrompt.ask("[bold cyan]Maximum requests per second (UXCam max: 5.0)[/]", default=cfg.max_requests_per_second)
-                if new_rps <= 0:
-                    console.print("[red]❌ Error: Rate limit must be positive (> 0)![/]\n")
-                elif cfg.is_uxcam_profile() and new_rps > 5.0:
-                    console.print(f"[red]❌ Error: UXCam bug bounty policy enforces a hard maximum of 5 requests per second (requested {new_rps})![/]\n")
+                # Validate program policy
+                errors = PolicyValidator.validate(active_profile)
+                if errors:
+                    console.print(f"\n[bold red]❌ Validation Failed for '{active_profile.id}':[/]")
+                    for err in errors:
+                        console.print(f"   • [yellow]{err}[/]")
                 else:
-                    cfg.max_requests_per_second = new_rps
-                    console.print(f"[green]✓ Rate limit set to {cfg.max_requests_per_second} RPS[/]\n")
+                    console.print(f"\n[bold green]✓ Program profile '{active_profile.id}' is 100% VALID and compliant with all security policies![/]\n")
+                Prompt.ask("Press Enter to continue", default="")
 
             elif choice == "6":
-                cfg.concurrency = IntPrompt.ask("[bold cyan]Concurrency workers (1-5 recommended for 5 RPS)[/]", default=cfg.concurrency)
-                console.print(f"[green]✓ Concurrency set to {cfg.concurrency}[/]\n")
+                # View program scope
+                console.print(f"\n[bold cyan]=== Scope for {active_profile.name} ===[/]")
+                console.print(f"  Allowed Domains: {', '.join(active_profile.scope.allowed_domains) or 'None'}")
+                console.print(f"  Excluded Domains: {', '.join(active_profile.scope.excluded_domains) or 'None'}")
+                console.print(f"  Allowed CIDRs: {', '.join(active_profile.scope.allowed_cidrs) or 'None'}")
+                console.print(f"  Excluded CIDRs: {', '.join(active_profile.scope.excluded_cidrs) or 'None'}")
+                console.print(f"  Excluded Paths: {', '.join(active_profile.scope.excluded_paths) or 'None'}")
+                console.print(f"  Third-Party Hosted Exclusions: {', '.join(active_profile.scope.third_party_hosted_exclusions) or 'None'}")
+                console.print()
+                Prompt.ask("Press Enter to continue", default="")
 
             elif choice == "7":
-                cfg.javascript_extraction = not cfg.javascript_extraction
-                console.print(f"[green]✓ JavaScript extraction: {'Enabled' if cfg.javascript_extraction else 'Disabled'}[/]\n")
+                # Configure authentication
+                console.print(f"\n[bold cyan]Current Auth Type: {active_profile.authentication.type}[/]")
+                new_type = Prompt.ask("Select auth type", choices=["none", "bearer", "api_key", "cookie", "basic"], default=active_profile.authentication.type)
+                active_profile.authentication.type = new_type
+                if new_type in ("bearer", "api_key"):
+                    active_profile.authentication.token_env = Prompt.ask("Token Environment Variable", default=active_profile.authentication.token_env or "PROGRAM_API_TOKEN")
+                target_path = pm.base_dir / active_profile.id / "program.yaml"
+                active_profile.save_yaml(target_path)
+                console.print("[green]✓ Authentication configuration saved.[/]\n")
+                time.sleep(1)
 
             elif choice == "8":
-                cfg.endpoint_discovery = not cfg.endpoint_discovery
-                console.print(f"[green]✓ Endpoint discovery: {'Enabled' if cfg.endpoint_discovery else 'Disabled'}[/]\n")
+                # Configure request limits
+                new_rps = FloatPrompt.ask("[bold cyan]Enter max requests per second[/]", default=active_profile.request_policy.max_rps)
+                if active_profile.id == "uxcam" and new_rps > 5.0:
+                    console.print("[red]❌ Error: UXCam program policy strictly limits rate to max 5.0 RPS![/]\n")
+                elif new_rps <= 0:
+                    console.print("[red]❌ Error: Rate must be positive (> 0)![/]\n")
+                else:
+                    active_profile.request_policy.max_rps = new_rps
+                    target_path = pm.base_dir / active_profile.id / "program.yaml"
+                    active_profile.save_yaml(target_path)
+                    console.print(f"[green]✓ Rate limit set to {new_rps} RPS.[/]\n")
+                time.sleep(1)
 
             elif choice == "9":
-                cfg.secret_detection = not cfg.secret_detection
-                console.print(f"[green]✓ Secret detection: {'Enabled' if cfg.secret_detection else 'Disabled'}[/]\n")
+                # Select reconnaissance modules
+                console.print(f"\n[bold cyan]=== Tool Compatibility & Modules for {active_profile.name} ===[/]")
+                tcm = ToolCompatibilityManager(active_profile)
+                for tool, info in tcm.get_tool_audit_report().items():
+                    st = "[green]Enabled[/]" if info["compatible"] else "[red]Disabled[/]"
+                    console.print(f"  • {tool:<18}: {st} ({info['reason']})")
+                console.print()
+                Prompt.ask("Press Enter to continue", default="")
 
             elif choice == "10":
-                console.print("\nTemplate choices: [1] Bugcrowd  [2] HackerOne  [3] Email")
-                t_choice = Prompt.ask("Select template", choices=["1", "2", "3"], default="1")
-                cfg.default_template = {"1": "bugcrowd", "2": "hackerone", "3": "email"}[t_choice]
+                # Start reconnaissance
+                console.print(f"\n[bold yellow]Target Hostname for Recon: {target}[/]")
+                if Confirm.ask(f"Change target domain? (Current: {target})", default=False):
+                    target = Prompt.ask("Enter target domain", default=target)
 
-                console.print("\nFormat choices: [1] HTML  [2] JSON")
-                f_choice = Prompt.ask("Select format", choices=["1", "2"], default="1")
-                cfg.default_format = {"1": "html", "2": "json"}[f_choice]
-                console.print(f"[green]✓ Report set to: {cfg.default_template.upper()} ({cfg.default_format.upper()})[/]\n")
-
-            elif choice == "11":
-                render_review_panel(cfg, target)
-                Prompt.ask("Press Enter to return to menu", default="")
-
-            elif choice == "12":
-                render_review_panel(cfg, target)
-                # Scope check on target
-                scope_mgr = cfg.get_scope_manager()
-                host = scope_mgr.extract_hostname(target)
-                if host and not scope_mgr.is_host_allowed(host):
-                    console.print(f"[bold red]❌ ERROR: Target '{target}' is not in allowed scope or is excluded![/]")
-                    console.print("[yellow]Please update the target or configure allowed scope first.[/]\n")
+                # Validate scope
+                sm = ScopeManager.from_profile(active_profile)
+                host = sm.extract_hostname(target)
+                if not sm.is_host_allowed(host):
+                    console.print(f"\n[bold red]❌ ERROR: Target '{target}' is OUT OF SCOPE for program '{active_profile.name}'![/]")
                     Prompt.ask("Press Enter to continue", default="")
                     continue
 
-                if Confirm.ask("[bold green]Confirm: Proceed with live reconnaissance scan?[/]", default=True):
-                    run_scan_subprocess(target, cfg)
+                if Confirm.ask(f"[bold green]Confirm: Start live scan against '{target}' under program '{active_profile.name}'?[/]", default=True):
+                    run_scan_subprocess(target, active_profile)
                     Prompt.ask("\nPress Enter to return to menu", default="")
-                else:
-                    console.print("[yellow]Scan cancelled by user.[/yellow]\n")
 
-            elif choice == "0":
+            elif choice == "11":
+                # View reports
+                reports = list(Path(".").glob("report_*.*"))
+                if not reports:
+                    console.print("\n[yellow]No reports found in current directory.[/yellow]\n")
+                else:
+                    console.print("\n[bold cyan]Generated Reports:[/]")
+                    for r in reports:
+                        console.print(f"  • {r.name} ({r.stat().st_size} bytes)")
+                    console.print()
+                Prompt.ask("Press Enter to continue", default="")
+
+            elif choice == "12":
+                # View audit logs
+                al = AuditLogger(program_id=active_profile.id)
+                recent = al.read_recent_logs(limit=20)
+                if not recent:
+                    console.print("\n[yellow]Audit log is currently empty (logs/audit.jsonl).[/yellow]\n")
+                else:
+                    console.print(f"\n[bold cyan]=== Recent Audit Log Entries ({len(recent)} displayed) ===[/]")
+                    for r in recent:
+                        st = f"[{r.get('response_status')}]" if r.get('response_status') else ""
+                        console.print(f"  [{r.get('timestamp')[:19]}] {r.get('method')} {r.get('url')[:60]} -> {r.get('scope_decision')} {st}")
+                    console.print()
+                Prompt.ask("Press Enter to continue", default="")
+
+            elif choice == "13":
+                # Run tests
+                console.print("\n[bold cyan]Running automated test suite...[/]\n")
+                subprocess.run([sys.executable, "-m", "pytest", "tests/", "-v"])
+                Prompt.ask("\nPress Enter to continue", default="")
+
+            elif choice == "14" or choice == "0":
                 console.print("[yellow]👋 Goodbye! Keep Learning // Keep Hacking[/yellow]")
                 break
 

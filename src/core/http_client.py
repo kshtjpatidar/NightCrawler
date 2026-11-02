@@ -1,15 +1,18 @@
 """
-NightCrawler - Scope-Aware, Rate-Limited HTTP Client
-Centralized HTTP client enforcing global rate limits (5 RPS), strict hop-by-hop
-redirect scope validation, verified TLS certificates, and in-scope researcher headers.
+NightCrawler - Policy-Aware HTTP Client Module
+Asynchronous HTTP client guaranteeing:
+1. Strict scope enforcement before every outbound request and redirect hop.
+2. Centralized rate limiting where every attempt (initial, retry, redirect) consumes a token.
+3. TLS certificate verification with fail-closed rejection of insecure options.
+4. Credential isolation: headers and tokens are never sent to out-of-scope hosts.
+5. Structured audit logging of all requests and policy decisions.
 """
 
 import asyncio
-import ssl
 import logging
-from typing import Optional, Dict, Tuple
-from urllib.parse import urljoin, urlparse
-
+import ssl
+from typing import Optional, Dict, Tuple, Any
+from urllib.parse import urljoin
 import aiohttp
 
 from src.core.scope import ScopeManager
@@ -26,28 +29,41 @@ class ScopeViolationError(Exception):
 
 class NightCrawlerHttpClient:
     """
-    Centralized asynchronous HTTP client that guarantees:
-    1. Scope enforcement before every outbound request and redirect hop.
-    2. Global rate limiting where EVERY actual HTTP attempt (initial, retry, redirect)
-       strictly consumes a rate-limit token from a shared limiter.
-    3. TLS certificate verification with strict mode rejection of insecure settings.
-    4. Safe attachment of researcher identification headers exclusively to in-scope targets.
+    Centralized asynchronous HTTP client that guarantees compliance with
+    program scope, rate limits, TLS verification, and audit logging.
     """
 
     def __init__(
         self,
         scope_manager: ScopeManager,
-        rate_limiter: GlobalRateLimiter,
-        header_manager: HeaderManager,
+        rate_limiter: Optional[GlobalRateLimiter] = None,
+        header_manager: Optional[HeaderManager] = None,
         timeout_seconds: int = 30,
         verify_tls: bool = True,
         strict_mode: bool = True,
         max_redirects: int = 5,
-        max_retries: int = 2
+        max_retries: int = 2,
+        request_policy_manager: Optional[Any] = None,
+        auth_manager: Optional[Any] = None,
+        audit_logger: Optional[Any] = None
     ):
         self.scope_manager = scope_manager
-        self.rate_limiter = rate_limiter
-        self.header_manager = header_manager
+        self.request_policy_manager = request_policy_manager
+        self.auth_manager = auth_manager
+        self.audit_logger = audit_logger
+
+        if rate_limiter:
+            self.rate_limiter = rate_limiter
+        elif request_policy_manager:
+            self.rate_limiter = request_policy_manager.global_limiter
+        else:
+            self.rate_limiter = GlobalRateLimiter(max_requests_per_second=5.0)
+
+        if header_manager:
+            self.header_manager = header_manager
+        else:
+            self.header_manager = HeaderManager()
+
         self.timeout = aiohttp.ClientTimeout(total=timeout_seconds)
         self.verify_tls = verify_tls
         self.strict_mode = strict_mode
@@ -79,17 +95,34 @@ class NightCrawlerHttpClient:
         # Step 1: Pre-request Scope Check
         if not self.scope_manager.is_url_in_scope(current_url):
             logger.debug(f"[Scope] Blocked out-of-scope URL: {current_url}")
+            if self.audit_logger:
+                host = self.scope_manager.extract_hostname(current_url) or "unknown"
+                self.audit_logger.log_event(
+                    target_host=host,
+                    method="GET",
+                    url=current_url,
+                    scope_decision="BLOCKED",
+                    policy_decision="DENIED",
+                    rate_limiter_decision="N/A"
+                )
             return None, None, None
 
         redirect_count = 0
 
         while redirect_count <= self.max_redirects:
-            # Build headers (researcher header only attached if current_url is in-scope)
-            headers = self.header_manager.get_headers_for_url(
-                current_url,
-                scope_manager=self.scope_manager,
-                base_headers=extra_headers
-            )
+            # Build headers (credentials only attached if current_url is in-scope)
+            if self.auth_manager:
+                headers = self.auth_manager.get_headers_for_url(
+                    current_url,
+                    scope_manager=self.scope_manager,
+                    base_headers=extra_headers
+                )
+            else:
+                headers = self.header_manager.get_headers_for_url(
+                    current_url,
+                    scope_manager=self.scope_manager,
+                    base_headers=extra_headers
+                )
 
             # Retry loop: every attempt consumes a rate-limit token
             retry_count = 0
@@ -97,10 +130,23 @@ class NightCrawlerHttpClient:
                 # Scope check before each request attempt
                 if not self.scope_manager.is_url_in_scope(current_url):
                     logger.warning(f"[Scope] URL {current_url} is out of scope. Aborting attempt.")
+                    if self.audit_logger:
+                        host = self.scope_manager.extract_hostname(current_url) or "unknown"
+                        self.audit_logger.log_event(
+                            target_host=host,
+                            method="GET",
+                            url=current_url,
+                            scope_decision="BLOCKED",
+                            policy_decision="DENIED"
+                        )
                     return None, None, current_url
 
                 # Every actual HTTP network attempt consumes a token from the shared limiter
-                await self.rate_limiter.acquire()
+                host = self.scope_manager.extract_hostname(current_url)
+                if self.request_policy_manager:
+                    await self.request_policy_manager.acquire(host=host)
+                else:
+                    await self.rate_limiter.acquire()
 
                 try:
                     async with session.get(
@@ -109,8 +155,22 @@ class NightCrawlerHttpClient:
                         ssl=self.ssl_context,
                         allow_redirects=False
                     ) as response:
+                        # Log audit event
+                        if self.audit_logger:
+                            self.audit_logger.log_event(
+                                target_host=host or "unknown",
+                                method="GET",
+                                url=current_url,
+                                scope_decision="ALLOWED",
+                                policy_decision="PERMITTED",
+                                response_status=response.status
+                            )
+
                         # Handle Redirection (301, 302, 303, 307, 308)
                         if response.status in (301, 302, 303, 307, 308):
+                            if self.request_policy_manager:
+                                self.request_policy_manager.record_redirect()
+
                             location = response.headers.get("Location")
                             if not location:
                                 return response.status, None, current_url
@@ -123,6 +183,16 @@ class NightCrawlerHttpClient:
                                     f"[Scope] Redirect from {current_url} to out-of-scope target "
                                     f"{next_url} was blocked!"
                                 )
+                                if self.audit_logger:
+                                    next_host = self.scope_manager.extract_hostname(next_url) or "unknown"
+                                    self.audit_logger.log_event(
+                                        target_host=next_host,
+                                        method="GET",
+                                        url=next_url,
+                                        scope_decision="BLOCKED",
+                                        policy_decision="DENIED",
+                                        redirect_decision="BLOCKED_OUT_OF_SCOPE"
+                                    )
                                 return response.status, None, current_url
 
                             # Proceed to next hop
@@ -133,7 +203,12 @@ class NightCrawlerHttpClient:
                         # Retry on rate limited (429) or transient server errors (502, 503, 504)
                         if response.status in (429, 502, 503, 504) and retry_count < self.max_retries:
                             retry_count += 1
-                            await asyncio.sleep(0.5 * retry_count)
+                            if self.request_policy_manager:
+                                self.request_policy_manager.record_retry()
+                                backoff = self.request_policy_manager.calculate_backoff(retry_count)
+                            else:
+                                backoff = 0.5 * retry_count
+                            await asyncio.sleep(backoff)
                             continue
 
                         # 200 OK or other final response
@@ -152,10 +227,16 @@ class NightCrawlerHttpClient:
 
                 except (aiohttp.ClientError, asyncio.TimeoutError) as net_err:
                     retry_count += 1
+                    if self.request_policy_manager:
+                        self.request_policy_manager.record_retry()
+                        backoff = self.request_policy_manager.calculate_backoff(retry_count)
+                    else:
+                        backoff = 0.5 * retry_count
+
                     if retry_count > self.max_retries:
                         logger.debug(f"[HTTP] Failed after {self.max_retries} retries: {current_url} ({net_err})")
                         return None, None, current_url
-                    await asyncio.sleep(0.5 * retry_count)
+                    await asyncio.sleep(backoff)
 
         logger.warning(f"[HTTP] Maximum redirects ({self.max_redirects}) exceeded for {url}")
         return None, None, current_url

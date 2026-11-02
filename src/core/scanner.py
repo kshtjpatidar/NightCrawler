@@ -37,6 +37,14 @@ from src.core.http_client import NightCrawlerHttpClient
 from src.core.endpoints import EndpointExtractor, DiscoveredEndpoint, ExtractedJsMetadata
 from src.output.html_report import mask_secret
 
+# Multi-Program Framework Components
+from src.core.program_profile import ProgramProfile
+from src.core.request_policy import RequestPolicyManager
+from src.core.auth_manager import AuthenticationManager
+from src.core.permissions import TestingPermissionManager
+from src.core.tool_compatibility import ToolCompatibilityManager
+from src.core.audit_logger import AuditLogger
+
 console = Console()
 
 
@@ -116,27 +124,64 @@ class NightCrawlerScanner:
         javascript_extraction: bool = True,
         endpoint_discovery: bool = True,
         secret_detection: bool = True,
-        validate_keys: bool = False
+        validate_keys: bool = False,
+        # Multi-program framework extensions
+        profile: Optional[ProgramProfile] = None,
+        auth_manager: Optional[AuthenticationManager] = None,
+        permission_manager: Optional[TestingPermissionManager] = None,
+        tool_compatibility_manager: Optional[ToolCompatibilityManager] = None,
+        audit_logger: Optional[AuditLogger] = None,
+        request_policy_manager: Optional[RequestPolicyManager] = None
     ):
-        self.concurrency = max(1, concurrency)
-        self.timeout_seconds = timeout
-        self.timeout = aiohttp.ClientTimeout(total=timeout)
+        self.profile = profile
+
+        if self.profile:
+            self.scope_manager = scope_manager or ScopeManager.from_profile(self.profile)
+            self.request_policy_manager = request_policy_manager or RequestPolicyManager.from_profile(
+                self.profile,
+                global_override_rps=max_requests_per_second if max_requests_per_second != 5.0 else None
+            )
+            self.rate_limiter = self.request_policy_manager.global_limiter
+            self.auth_manager = auth_manager or AuthenticationManager.from_profile(self.profile, scope_manager=self.scope_manager)
+            self.header_manager = header_manager or HeaderManager()
+            self.permission_manager = permission_manager or TestingPermissionManager.from_profile(self.profile, allow_credential_validation=validate_keys)
+            self.tool_compatibility_manager = tool_compatibility_manager or ToolCompatibilityManager(self.profile)
+            self.audit_logger = audit_logger or AuditLogger(program_id=self.profile.id)
+
+            self.concurrency = self.request_policy_manager.concurrency_limit
+            self.timeout_seconds = self.request_policy_manager.timeout
+            self.max_requests_per_second = self.request_policy_manager.effective_rps
+            self.strict_scope = self.request_policy_manager.strict_scope
+            self.verify_tls = self.request_policy_manager.verify_tls
+            self.javascript_extraction = self.permission_manager.is_permitted("javascript_analysis")
+            self.endpoint_discovery = self.permission_manager.is_permitted("endpoint_discovery")
+            self.secret_detection = self.permission_manager.is_permitted("secret_detection")
+            self.validate_keys = self.permission_manager.is_permitted("credential_validation")
+        else:
+            self.concurrency = max(1, concurrency)
+            self.timeout_seconds = timeout
+            self.max_requests_per_second = max_requests_per_second
+            self.strict_scope = strict_scope
+            self.verify_tls = verify_tls
+            self.javascript_extraction = javascript_extraction
+            self.endpoint_discovery = endpoint_discovery
+            self.secret_detection = secret_detection
+            self.validate_keys = validate_keys
+
+            self.scope_manager = scope_manager or ScopeManager(enabled=strict_scope)
+            self.rate_limiter = rate_limiter or GlobalRateLimiter(max_requests_per_second=max_requests_per_second)
+            self.header_manager = header_manager or HeaderManager()
+            self.auth_manager = auth_manager
+            self.permission_manager = permission_manager or TestingPermissionManager(allow_credential_validation=validate_keys)
+            self.tool_compatibility_manager = tool_compatibility_manager
+            self.audit_logger = audit_logger
+            self.request_policy_manager = request_policy_manager
+
+        self.timeout = aiohttp.ClientTimeout(total=self.timeout_seconds)
         self.depth = depth
         self.use_external_tools = use_external_tools
         self.verbose = verbose
         self.validate = validate
-        
-        # Scope, headers, rate limiting
-        self.scope_manager = scope_manager or ScopeManager(enabled=strict_scope)
-        self.max_requests_per_second = max_requests_per_second
-        self.rate_limiter = rate_limiter or GlobalRateLimiter(max_requests_per_second=max_requests_per_second)
-        self.header_manager = header_manager or HeaderManager()
-        self.verify_tls = verify_tls
-        self.strict_scope = strict_scope
-        self.javascript_extraction = javascript_extraction
-        self.endpoint_discovery = endpoint_discovery
-        self.secret_detection = secret_detection
-        self.validate_keys = validate_keys
 
         # In strict compliance mode, reject insecure TLS configuration
         if self.strict_scope and not self.verify_tls:
@@ -147,9 +192,12 @@ class NightCrawlerScanner:
             scope_manager=self.scope_manager,
             rate_limiter=self.rate_limiter,
             header_manager=self.header_manager,
-            timeout_seconds=timeout,
-            verify_tls=verify_tls,
-            strict_mode=strict_scope
+            timeout_seconds=self.timeout_seconds,
+            verify_tls=self.verify_tls,
+            strict_mode=self.strict_scope,
+            request_policy_manager=self.request_policy_manager,
+            auth_manager=self.auth_manager,
+            audit_logger=self.audit_logger
         )
 
         # Endpoint extractor
@@ -285,8 +333,12 @@ class NightCrawlerScanner:
         if not content:
             return findings
 
-        # Run endpoint discovery and JS metadata extraction if enabled
-        if self.endpoint_discovery or self.javascript_extraction:
+        # Check permission for JavaScript analysis
+        if not self.permission_manager.is_permitted("javascript_analysis"):
+            return []
+
+        # Run endpoint discovery and JS metadata extraction if permitted
+        if self.permission_manager.is_permitted("endpoint_discovery"):
             meta = self.endpoint_extractor.extract_from_js(content, url)
             if meta.endpoints:
                 self.results.discovered_endpoints.extend(meta.endpoints)
@@ -297,8 +349,8 @@ class NightCrawlerScanner:
             if meta.sensitive_config_keys:
                 self.results.sensitive_config_keys.extend(meta.sensitive_config_keys)
 
-        # Skip secret scanning if secret_detection is disabled
-        if not self.secret_detection:
+        # Skip secret scanning if secret_detection is prohibited
+        if not self.permission_manager.is_permitted("secret_detection"):
             return findings
 
         # Beautify JS for better matching
@@ -392,9 +444,17 @@ class NightCrawlerScanner:
         console.print()
         
         all_js_urls = set()
+
+        def can_use_tool(tool_name: str) -> bool:
+            if not self.use_external_tools:
+                return False
+            if self.tool_compatibility_manager:
+                ok, _ = self.tool_compatibility_manager.is_tool_compatible(tool_name)
+                return ok
+            return True
         
         # Phase 1: Subdomain Enumeration
-        if self.use_external_tools and self.subfinder.is_available():
+        if can_use_tool("subfinder") and self.subfinder.is_available():
             subdomains = self.subfinder.enumerate(target_host or target)
             subdomains = self.scope_manager.filter_subdomains(subdomains)
             self.results.subdomains_found = len(subdomains)
@@ -404,37 +464,37 @@ class NightCrawlerScanner:
             self.results.subdomains_found = len(subdomains)
         
         # Phase 2: URL Gathering with scope-aware external tools
-        if self.use_external_tools and subdomains:
+        if subdomains:
             live_urls = [f"https://{s}" for s in subdomains]
             
             # GAU (archived URLs) - filtered against scope
-            if self.gau.is_available():
+            if can_use_tool("gau") and self.gau.is_available():
                 archived_js = self.gau.fetch(subdomains)
                 all_js_urls.update(self.scope_manager.filter_urls(archived_js))
             
             # Waybackurls (Wayback Machine) - filtered against scope
-            if self.waybackurls.is_available():
+            if can_use_tool("waybackurls") and self.waybackurls.is_available():
                 wayback_js = self.waybackurls.fetch(subdomains)
                 all_js_urls.update(self.scope_manager.filter_urls(wayback_js))
             
             # Katana (live crawling with rate limiting) - filtered against scope
-            if self.katana.is_available():
+            if can_use_tool("katana") and self.katana.is_available():
                 crawled = self.katana.crawl(live_urls, depth=self.depth)
                 js_from_crawl = [u for u in crawled if '.js' in u.lower()]
                 all_js_urls.update(self.scope_manager.filter_urls(js_from_crawl))
             
             # Hakrawler
-            if self.hakrawler.is_available():
+            if can_use_tool("hakrawler") and self.hakrawler.is_available():
                 hakrawler_js = self.hakrawler.crawl(live_urls, depth=self.depth)
                 all_js_urls.update(self.scope_manager.filter_urls(hakrawler_js))
             
             # SubJS
-            if self.subjs.is_available():
+            if can_use_tool("subjs") and self.subjs.is_available():
                 subjs_urls = self.subjs.fetch(live_urls)
                 all_js_urls.update(self.scope_manager.filter_urls(subjs_urls))
             
             # GetJS
-            if self.getjs.is_available():
+            if can_use_tool("getjs") and self.getjs.is_available():
                 getjs_urls = self.getjs.extract(live_urls[:20])
                 all_js_urls.update(self.scope_manager.filter_urls(getjs_urls))
         

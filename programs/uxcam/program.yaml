@@ -1,0 +1,91 @@
+# UXCam Bug Bounty Program Profile
+# Policy-aware reconnaissance rules for authorized UXCam assets
+
+id: uxcam
+name: "UXCam Bug Bounty Program"
+version: "1.0.0"
+platform: "Bugcrowd"
+policy_url: "https://bugcrowd.com/uxcam"
+description: "Authorized bug bounty reconnaissance profile for UXCam targets."
+
+scope:
+  enabled: true
+  allowed_domains:
+    - "uxcam.com"
+    - "*.uxcam.com"
+    - "uxc.am"
+    - "*.uxc.am"
+  excluded_domains:
+    - "tara.uxcam.com"
+    - "*.tara.uxcam.com"
+    - "connect.uxcam.com"
+    - "*.connect.uxcam.com"
+  allowed_ips: []
+  allowed_cidrs: []
+  excluded_ips: []
+  excluded_cidrs: []
+  allowed_paths: []
+  excluded_paths: []
+  allowed_protocols:
+    - "http"
+    - "https"
+  allowed_ports:
+    - 80
+    - 443
+    - 8080
+    - 8443
+  third_party_hosted_exclusions:
+    - "help.uxcam.com"
+    - "blog.uxcam.com"
+
+request_policy:
+  max_rps: 5.0
+  concurrency: 1
+  timeout: 30
+  max_retries: 2
+  crawl_depth: 1
+  burst: 1
+  verify_tls: true
+  strict_scope: true
+  per_host_rps: 5.0
+
+headers:
+  required:
+    X-User-Id: "${NIGHTCRAWLER_RESEARCHER_ID}"
+  optional: {}
+
+authentication:
+  type: "none"
+  # token_env: null
+  # header_name: null
+
+testing_permissions:
+  passive_recon: true
+  active_recon: true
+  endpoint_discovery: true
+  javascript_analysis: true
+  secret_detection: true
+  credential_validation: false
+  fuzzing: false
+  injection_testing: false
+  destructive_testing: false
+  denial_of_service: false
+  social_engineering: false
+
+tool_restrictions:
+  allowed_tools:
+    - "subfinder"
+    - "httpx"
+    - "gau"
+    - "waybackurls"
+    - "jsluice"
+  disabled_tools:
+    - "katana"
+    - "hakrawler"
+    - "subjs"
+    - "getjs"
+
+reporting:
+  default_template: "bugcrowd"
+  default_format: "html"
+  program_name: "UXCam Bug Bounty Program"

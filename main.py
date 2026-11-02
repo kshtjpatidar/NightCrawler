@@ -7,7 +7,7 @@
 ██║ ╚████║██║╚██████╔╝██║  ██║   ██║   ╚██████╗██║  ██║██║  ██║╚███╔███╔╝███████╗███████╗██║  ██║
 ╚═╝  ╚═══╝╚═╝ ╚═════╝ ╚═╝  ╚═╝   ╚═╝    ╚═════╝╚═╝  ╚═╝╚═╝  ╚═╝ ╚══╝╚══╝ ╚══════╝╚══════╝╚═╝  ╚═╝
 
-NightCrawler v5.0 - Scope-Aware, Rate-Limited Bug Bounty Reconnaissance
+NightCrawler v5.0 - Multi-Program, Policy-Aware Bug Bounty Reconnaissance Framework
 by kshtjpatidar | Keep Learning // Keep Hacking
 
 ⚠️ ETHICAL USE ONLY - For authorized security testing and bug bounty programs 
@@ -18,7 +18,7 @@ import click
 import os
 import sys
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 from src.ui.banner import print_banner
 from src.core.scanner import NightCrawlerScanner
@@ -30,6 +30,16 @@ from src.output.console import ConsoleOutput
 from src.output.html_report import HtmlReportGenerator, ReportConfig, mask_secret
 from src.validators.keyhacks import KeyHacksValidator, ValidationStatus
 
+# Multi-Program Framework Components
+from src.core.program_manager import ProgramManager
+from src.core.program_profile import ProgramProfile, PolicyParser, PolicyValidator
+from src.core.request_policy import RequestPolicyManager
+from src.core.auth_manager import AuthenticationManager
+from src.core.permissions import TestingPermissionManager
+from src.core.tool_compatibility import ToolCompatibilityManager
+from src.core.audit_logger import AuditLogger
+from src.output.report_manager import ReportManager
+
 
 def show_scan_mode_menu():
     """Display scan mode selection menu"""
@@ -39,7 +49,7 @@ def show_scan_mode_menu():
     click.echo(click.style("├─────────────────────────────────────────────────────────────┤", fg="cyan"))
     click.echo(click.style("│                                                             │", fg="cyan"))
     click.echo(click.style("│  ", fg="cyan") + click.style("[1]", fg="green", bold=True) + click.style(" Main Domain Only", fg="white") + click.style("                                  │", fg="cyan"))
-    click.echo(click.style("│      ", fg="cyan") + click.style("→ Scan only target domain (respects 5 RPS limit)", dim=True) + click.style("    │", fg="cyan"))
+    click.echo(click.style("│      ", fg="cyan") + click.style("→ Scan only target domain (respects program RPS limit)", dim=True) + click.style("   │", fg="cyan"))
     click.echo(click.style("│                                                             │", fg="cyan"))
     click.echo(click.style("│  ", fg="cyan") + click.style("[2]", fg="yellow", bold=True) + click.style(" Include Subdomains", fg="white") + click.style("                                │", fg="cyan"))
     click.echo(click.style("│      ", fg="cyan") + click.style("→ Subfinder enumeration (in-scope subdomains only)", dim=True) + click.style("│", fg="cyan"))
@@ -51,60 +61,106 @@ def show_scan_mode_menu():
     click.echo()
 
 
-@click.command()
-@click.option('-t', '--target', help='Single target domain (e.g., uxcam.com)')
+@click.group(invoke_without_command=True)
+@click.option('-t', '--target', help='Single target domain or URL (e.g., uxcam.com)')
 @click.option('-l', '--list', 'target_list', type=click.Path(exists=True), help='File containing list of targets')
 @click.option('-u', '--urls', type=click.Path(exists=True), help='File containing JS URLs to scan directly')
-@click.option('-o', '--output', type=click.Path(), help='Output file (supports .json, .html)')
-@click.option('-c', '--concurrency', default=None, type=int, help='Concurrent workers (default: 1)')
-@click.option('-d', '--depth', default=None, type=int, help='Crawl depth (default: 1)')
-@click.option('--timeout', default=None, type=int, help='Request timeout in seconds (default: 30)')
+@click.option('-o', '--output', type=click.Path(), help='Output file (supports .json, .html, .md)')
+@click.option('-c', '--concurrency', default=None, type=int, help='Concurrent workers')
+@click.option('-d', '--depth', default=None, type=int, help='Crawl depth')
+@click.option('--timeout', default=None, type=int, help='Request timeout in seconds')
 @click.option('--offline', type=click.Path(exists=True), help='Scan local JS files in directory')
 @click.option('--patterns', type=click.Path(exists=True), help='Custom patterns file (YAML)')
 @click.option('-v', '--verbose', is_flag=True, help='Enable verbose output')
 @click.option('-q', '--quiet', is_flag=True, help='Only output findings')
 @click.option('--config-file', type=click.Path(exists=True), help='Path to custom config.yaml')
-# Scan Mode Options
 @click.option('--mode', type=click.Choice(['main', 'subdomains', 'deep']), help='Scan mode: main, subdomains, or deep')
 @click.option('--no-prompt', is_flag=True, help='Skip interactive prompts')
-# Rate Limiting & Scope Controls
-@click.option('--max-rps', default=None, type=float, help='Global maximum requests per second (default: 5.0)')
+@click.option('--max-rps', default=None, type=float, help='Global maximum requests per second')
 @click.option('--allowed-domain', 'allowed_domains', multiple=True, help='Authorized domain pattern (e.g., uxcam.com, uxc.am)')
 @click.option('--excluded-domain', 'excluded_domains', multiple=True, help='Excluded domain pattern (e.g., tara.uxcam.com)')
-@click.option('--scope/--no-scope', 'scope_enabled', default=None, help='Enable/disable target scope enforcement (default: True)')
+@click.option('--scope/--no-scope', 'scope_enabled', default=None, help='Enable/disable target scope enforcement')
 @click.option('--verify-tls/--no-verify-tls', default=None, help='Verify TLS certificates (default: True)')
 @click.option('--strict-scope/--no-strict-scope', default=None, help='Enforce strict scope boundary checks (default: True)')
-# Researcher Header Options
 @click.option('--header-name', help='Custom researcher header name (e.g., X-User-Id)')
 @click.option('--header-value', help='Custom researcher header value (prefer setting NIGHTCRAWLER_RESEARCHER_ID env var)')
 @click.option('--enable-header/--disable-header', default=None, help='Enable researcher identification header')
-# KeyHacks Validation
 @click.option('--validate-keys', is_flag=True, default=False, help='🔑 Auto-validate discovered secrets using KeyHacks (default: False)')
 @click.option('--validate-timeout', default=10, help='Timeout for KeyHacks validation requests (default: 10)')
-# Report Options
 @click.option('--template', type=click.Choice(['bugcrowd', 'hackerone', 'email']), default=None,
               help='Report template format (default: bugcrowd)')
 @click.option('--reporter', default=None, help='Reporter name for the report')
 @click.option('--reporter-email', default=None, help='Reporter email address')
-@click.option('--program', default=None, help='Bug bounty program name')
+@click.option('--program', default=None, help='Bug bounty program profile ID (e.g. uxcam, example-program)')
 @click.version_option(version='5.0.0', prog_name='NightCrawler')
-def main(target, target_list, urls, output, concurrency, depth, timeout, 
+@click.pass_context
+def main(ctx, target, target_list, urls, output, concurrency, depth, timeout, 
          offline, patterns, verbose, quiet, config_file, mode, no_prompt,
          max_rps, allowed_domains, excluded_domains, scope_enabled, verify_tls, strict_scope,
          header_name, header_value, enable_header, validate_keys, validate_timeout,
          template, reporter, reporter_email, program):
     """
-    NightCrawler v5.0 - Scope-Aware, Rate-Limited Bug Bounty Reconnaissance
+    NightCrawler v5.0 - Multi-Program, Policy-Aware Bug Bounty Reconnaissance Framework
     
     Hunt for exposed secrets, API keys, and hidden endpoints in JavaScript files.
-    Complies with bug bounty program rules: strict target scope, max 5 RPS rate limit,
-    TLS certificate verification, researcher identification header, and Bugcrowd reporting.
+    Complies with bug bounty program rules: strict target scope, rate limits,
+    TLS certificate verification, researcher identification header, and structured reporting.
     """
+    if ctx.invoked_subcommand is not None:
+        return
+
     if not quiet:
         print_banner()
 
-    # Load base configuration from config.yaml and environment
+    # Load program profile or base configuration
+    pm = ProgramManager()
+    active_profile: Optional[ProgramProfile] = None
+
+    if program:
+        active_profile = pm.get_profile(program)
+        if not active_profile:
+            click.echo(click.style(f"\n[!] ERROR: Program profile '{program}' not found in programs/ directory!", fg='red', bold=True))
+            click.echo(click.style(f"    Available programs: {', '.join([p['id'] for p in pm.list_profiles()])}\n", fg='yellow'))
+            sys.exit(1)
+    else:
+        # Check if uxcam profile exists as default
+        active_profile = pm.get_profile("uxcam")
+
+    # Load base fallback configuration
     cfg = load_config(config_file)
+
+    # If profile exists, merge profile attributes into cfg
+    if active_profile:
+        cfg.program_name = active_profile.name
+        if not allowed_domains and active_profile.scope.allowed_domains:
+            cfg.allowed_domains = list(active_profile.scope.allowed_domains)
+        if not excluded_domains and active_profile.scope.excluded_domains:
+            cfg.excluded_domains = list(active_profile.scope.excluded_domains)
+        if max_rps is None:
+            cfg.max_requests_per_second = active_profile.request_policy.max_rps
+        if concurrency is None:
+            cfg.concurrency = active_profile.request_policy.concurrency
+        if timeout is None:
+            cfg.timeout = active_profile.request_policy.timeout
+        if depth is None:
+            cfg.depth = active_profile.request_policy.crawl_depth
+        if verify_tls is None:
+            cfg.verify_tls = active_profile.request_policy.verify_tls
+        if strict_scope is None:
+            cfg.strict_scope = active_profile.request_policy.strict_scope
+        if template is None:
+            cfg.default_template = active_profile.reporting.default_template
+        if active_profile.reporting.default_format:
+            cfg.default_format = active_profile.reporting.default_format
+
+        # Validate active profile policy before scanning
+        policy_errors = PolicyValidator.validate(active_profile)
+        if policy_errors:
+            click.echo(click.style(f"\n[!] POLICY ERROR: Program profile '{active_profile.id}' failed validation:", fg='red', bold=True))
+            for err in policy_errors:
+                click.echo(click.style(f"    - {err}", fg='yellow'))
+            click.echo()
+            sys.exit(1)
 
     # Merge CLI options onto configuration
     if concurrency is not None:
@@ -131,7 +187,6 @@ def main(target, target_list, urls, output, concurrency, depth, timeout,
         cfg.header_name = header_name
     if header_value:
         cfg.header_value = header_value
-        # Store into environment variable to ensure subprocesses and workers access it securely
         header_env_key = cfg.header_value_env or "NIGHTCRAWLER_RESEARCHER_ID"
         os.environ[header_env_key] = header_value
         os.environ["NIGHTCRAWLER_HEADER_VALUE"] = header_value
@@ -177,12 +232,14 @@ def main(target, target_list, urls, output, concurrency, depth, timeout,
         click.echo(click.style("└─────────────────────────────────────────────────────────────┘", fg='red'))
         click.echo(click.style("\n[*] Examples:", fg='cyan'))
         click.echo("    nightcrawler -t uxcam.com -o report.html")
+        click.echo("    nightcrawler --program uxcam -t uxcam.com")
+        click.echo("    nightcrawler programs list")
         click.echo("    export NIGHTCRAWLER_RESEARCHER_ID=researcher@example.com && nightcrawler -t uxcam.com --mode subdomains")
         click.echo("    nightcrawler --offline ./downloaded_js/ -o report.json")
         return
 
     # Interactive researcher header setup if not specified
-    if not no_prompt and not offline and not cfg.header_value:
+    if not no_prompt and not offline and not cfg.header_value and not os.getenv("NIGHTCRAWLER_RESEARCHER_ID"):
         click.echo()
         if click.confirm(click.style("[?] Enable researcher identification header (e.g. X-User-Id)?", fg="cyan"), default=cfg.custom_header_enabled):
             cfg.custom_header_enabled = True
@@ -190,6 +247,7 @@ def main(target, target_list, urls, output, concurrency, depth, timeout,
             val = click.prompt(click.style("    Header value (e.g. researcher email)", fg="white"), default="")
             if val:
                 cfg.header_value = val
+                os.environ[cfg.header_value_env or "NIGHTCRAWLER_RESEARCHER_ID"] = val
                 if click.confirm(click.style("    Save this configuration to config.yaml?", fg="cyan"), default=False):
                     cfg.save_to_file()
                     click.echo(click.style("    ✓ Configuration saved to config.yaml", fg="green"))
@@ -227,7 +285,7 @@ def main(target, target_list, urls, output, concurrency, depth, timeout,
             use_archives = True
 
     # Scope validation on single target
-    scope_mgr = cfg.get_scope_manager()
+    scope_mgr = ScopeManager.from_profile(active_profile) if active_profile else cfg.get_scope_manager()
     if target and scope_mgr.enabled:
         host = scope_mgr.extract_hostname(target)
         if host and not scope_mgr.is_host_allowed(host):
@@ -251,11 +309,13 @@ def main(target, target_list, urls, output, concurrency, depth, timeout,
 
     # Display configuration summary with sensitive values masked
     if not quiet:
+        prog_display = active_profile.name if active_profile else "Custom Target Profile"
         click.echo()
         click.echo(click.style("┌─────────────────────────────────────────────────────────────┐", fg='green'))
         click.echo(click.style("│               🦇  SCAN CONFIGURATION SUMMARY                │", fg='green'))
         click.echo(click.style("├─────────────────────────────────────────────────────────────┤", fg='green'))
-        click.echo(click.style(f"│  Target: {str(target or target_list or urls or offline):<51}│", fg='green'))
+        click.echo(click.style(f"│  Active Program: {prog_display[:42]:<43}│", fg='green'))
+        click.echo(click.style(f"│  Target: {str(target or target_list or urls or offline)[:50]:<51}│", fg='green'))
         click.echo(click.style(f"│  Mode: {(mode or 'main').upper():<53}│", fg='green'))
         click.echo(click.style(f"│  Allowed Scope: {', '.join(cfg.allowed_domains)[:43]:<44}│", fg='green'))
         click.echo(click.style(f"│  Excluded Scope: {', '.join(cfg.excluded_domains)[:42]:<43}│", fg='green'))
@@ -293,7 +353,8 @@ def main(target, target_list, urls, output, concurrency, depth, timeout,
         javascript_extraction=cfg.javascript_extraction,
         endpoint_discovery=cfg.endpoint_discovery,
         secret_detection=cfg.secret_detection,
-        validate_keys=cfg.validate_keys
+        validate_keys=cfg.validate_keys,
+        profile=active_profile
     )
 
     try:
@@ -331,19 +392,18 @@ def main(target, target_list, urls, output, concurrency, depth, timeout,
         default_out = output or f"report_{str(target or 'recon').replace('.', '_')}.{cfg.default_format}"
         output_path = Path(default_out)
 
-        rep_cfg = ReportConfig(
-            reporter_name=cfg.reporter_name,
-            reporter_email=cfg.reporter_email,
-            program_name=cfg.program_name,
-            template=cfg.default_template
-        )
-        report_gen = HtmlReportGenerator(rep_cfg)
+        rep_manager = ReportManager(profile=active_profile, reporter_name=cfg.reporter_name)
         valid_findings = [f for f in scanner.results.findings if f.validated]
 
-        report_gen.generate(
+        tools_status = scanner.tool_compatibility_manager.get_tool_audit_report() if scanner.tool_compatibility_manager else {}
+        stats = scanner.request_policy_manager.get_statistics() if scanner.request_policy_manager else {}
+
+        rep_manager.generate(
             findings=valid_findings,
             scan_result=scanner.results,
-            output_path=str(output_path)
+            output_path=str(output_path),
+            tools_report=tools_status,
+            stats=stats
         )
 
         click.echo()
@@ -367,6 +427,181 @@ def main(target, target_list, urls, output, concurrency, depth, timeout,
         if verbose:
             import traceback
             traceback.print_exc()
+
+
+# -------------------------------------------------------------
+# Multi-Program CLI Subcommands
+# -------------------------------------------------------------
+
+@main.group(name='programs')
+def programs_group():
+    """Manage multi-program bug bounty profiles (list, show, validate, import, export, create, duplicate)."""
+    pass
+
+
+@programs_group.command(name='list')
+def programs_list():
+    """List all available bug bounty program profiles."""
+    pm = ProgramManager()
+    profiles = pm.list_profiles()
+
+    if not profiles:
+        click.echo("\nNo program profiles found in programs/ directory.")
+        return
+
+    click.echo("\n" + click.style("┌──────────────────────────────────────────────────────────────────────────────┐", fg="cyan"))
+    click.echo(click.style("│                       📁  BUG BOUNTY PROGRAM PROFILES                        │", fg="cyan", bold=True))
+    click.echo(click.style("├─────────────────┬──────────────────────────────┬──────────┬─────────┬────────┤", fg="cyan"))
+    click.echo(click.style("│ Program ID      │ Name                         │ Platform │ Max RPS │ Status │", fg="cyan"))
+    click.echo(click.style("├─────────────────┼──────────────────────────────┼──────────┼─────────┼────────┤", fg="cyan"))
+
+    for p in profiles:
+        status = click.style("✓ VALID", fg="green") if p["valid"] else click.style("✗ ERR", fg="red")
+        if p.get("requires_review"):
+            status = click.style("? REVIEW", fg="yellow")
+        click.echo(f"│ {p['id']:<15} │ {p['name'][:28]:<28} │ {p['platform'][:8]:<8} │ {p['max_rps']:<7} │ {status} │")
+
+    click.echo(click.style("└─────────────────┴──────────────────────────────┴──────────┴─────────┴────────┘\n", fg="cyan"))
+
+
+@programs_group.command(name='show')
+@click.argument('program_id')
+def programs_show(program_id):
+    """Show detailed policy and scope configuration for a program profile."""
+    pm = ProgramManager()
+    profile = pm.get_profile(program_id)
+    if not profile:
+        click.echo(click.style(f"\n❌ Error: Program profile '{program_id}' not found.\n", fg="red"))
+        sys.exit(1)
+
+    click.echo("\n" + click.style(f"=== Program Profile: {profile.name} ({profile.id}) ===", fg="cyan", bold=True))
+    click.echo(f"Platform: {profile.platform} | Version: {profile.version}")
+    if profile.policy_url:
+        click.echo(f"Policy URL: {profile.policy_url}")
+    if profile.description:
+        click.echo(f"Description: {profile.description}")
+
+    click.echo("\n" + click.style("[Scope Rules]", fg="yellow", bold=True))
+    click.echo(f"  Allowed Domains: {', '.join(profile.scope.allowed_domains) or 'None'}")
+    click.echo(f"  Excluded Domains: {', '.join(profile.scope.excluded_domains) or 'None'}")
+    if profile.scope.allowed_cidrs:
+        click.echo(f"  Allowed CIDRs: {', '.join(profile.scope.allowed_cidrs)}")
+    if profile.scope.excluded_cidrs:
+        click.echo(f"  Excluded CIDRs: {', '.join(profile.scope.excluded_cidrs)}")
+    if profile.scope.excluded_paths:
+        click.echo(f"  Excluded Paths: {', '.join(profile.scope.excluded_paths)}")
+    if profile.scope.third_party_hosted_exclusions:
+        click.echo(f"  Third-Party Exclusions: {', '.join(profile.scope.third_party_hosted_exclusions)}")
+
+    click.echo("\n" + click.style("[Request Policy]", fg="yellow", bold=True))
+    click.echo(f"  Max RPS: {profile.request_policy.max_rps}")
+    click.echo(f"  Concurrency: {profile.request_policy.concurrency}")
+    click.echo(f"  Timeout: {profile.request_policy.timeout}s")
+    click.echo(f"  Strict Scope: {profile.request_policy.strict_scope}")
+    click.echo(f"  Verify TLS: {profile.request_policy.verify_tls}")
+
+    click.echo("\n" + click.style("[Headers & Authentication]", fg="yellow", bold=True))
+    req_hdrs = profile.resolve_headers()
+    click.echo(f"  Required Headers: {req_hdrs if req_hdrs else 'None'}")
+    click.echo(f"  Auth Type: {profile.authentication.type}")
+
+    click.echo("\n" + click.style("[Testing Permissions]", fg="yellow", bold=True))
+    tpm = TestingPermissionManager.from_profile(profile)
+    for act, perm in tpm.get_effective_permissions().items():
+        st = click.style("PERMITTED", fg="green") if perm else click.style("PROHIBITED", fg="red")
+        click.echo(f"  - {act:<25}: {st}")
+
+    click.echo("\n" + click.style("[Tool Compatibility]", fg="yellow", bold=True))
+    tcm = ToolCompatibilityManager(profile)
+    for tool, info in tcm.get_tool_audit_report().items():
+        st = click.style("ENABLED", fg="green") if info["compatible"] else click.style("DISABLED", fg="red")
+        click.echo(f"  - {tool:<15}: {st} ({info['reason']})")
+    click.echo()
+
+
+@programs_group.command(name='validate')
+@click.argument('program_id')
+def programs_validate(program_id):
+    """Validate a program profile against security policies and schema boundaries."""
+    pm = ProgramManager()
+    errors = pm.validate_profile(program_id)
+    if errors:
+        click.echo(click.style(f"\n❌ Validation failed for profile '{program_id}':", fg="red", bold=True))
+        for err in errors:
+            click.echo(click.style(f"   • {err}", fg="yellow"))
+        click.echo()
+        sys.exit(1)
+    else:
+        click.echo(click.style(f"\n✓ Program profile '{program_id}' is VALID and complies with all safety policies.\n", fg="green", bold=True))
+
+
+@programs_group.command(name='create')
+@click.argument('program_id')
+@click.option('--name', default=None, help='Program display name')
+@click.option('--domains', default='', help='Comma-separated allowed domains')
+@click.option('--max-rps', default=5.0, type=float, help='Max requests per second')
+def programs_create(program_id, name, domains, max_rps):
+    """Create a new program profile template."""
+    pm = ProgramManager()
+    allowed = [d.strip() for d in domains.split(",") if d.strip()]
+    data = {
+        "id": program_id,
+        "name": name or program_id.title(),
+        "scope": {"allowed_domains": allowed},
+        "request_policy": {"max_rps": max_rps}
+    }
+    try:
+        profile = pm.create_profile(data, save=True)
+        click.echo(click.style(f"\n✓ Created program profile '{profile.id}' at programs/{profile.id}/program.yaml\n", fg="green", bold=True))
+    except Exception as e:
+        click.echo(click.style(f"\n❌ Error creating profile: {e}\n", fg="red"))
+        sys.exit(1)
+
+
+@programs_group.command(name='import')
+@click.argument('source_file')
+def programs_import(source_file):
+    """Import a program profile from YAML, JSON, or text rules."""
+    pm = ProgramManager()
+    try:
+        profile = pm.import_profile(source_file)
+        click.echo(click.style(f"\n✓ Successfully imported program '{profile.id}' ({profile.name}).", fg="green", bold=True))
+        if profile.requires_review:
+            click.echo(click.style("⚠️  Notice: Profile contains ambiguous rules that require review.", fg="yellow"))
+            for n in profile.review_notes:
+                click.echo(click.style(f"   - {n}", fg="yellow"))
+        click.echo()
+    except Exception as e:
+        click.echo(click.style(f"\n❌ Error importing profile: {e}\n", fg="red"))
+        sys.exit(1)
+
+
+@programs_group.command(name='export')
+@click.argument('program_id')
+@click.argument('output_file')
+def programs_export(program_id, output_file):
+    """Export a program profile to YAML or JSON."""
+    pm = ProgramManager()
+    try:
+        out_path = pm.export_profile(program_id, output_file)
+        click.echo(click.style(f"\n✓ Exported profile '{program_id}' to {out_path}\n", fg="green"))
+    except Exception as e:
+        click.echo(click.style(f"\n❌ Error exporting profile: {e}\n", fg="red"))
+        sys.exit(1)
+
+
+@programs_group.command(name='duplicate')
+@click.argument('source_id')
+@click.argument('new_id')
+def programs_duplicate(source_id, new_id):
+    """Duplicate an existing program profile."""
+    pm = ProgramManager()
+    try:
+        new_prof = pm.duplicate_profile(source_id, new_id)
+        click.echo(click.style(f"\n✓ Duplicated profile '{source_id}' -> '{new_prof.id}'\n", fg="green"))
+    except Exception as e:
+        click.echo(click.style(f"\n❌ Error duplicating profile: {e}\n", fg="red"))
+        sys.exit(1)
 
 
 if __name__ == '__main__':

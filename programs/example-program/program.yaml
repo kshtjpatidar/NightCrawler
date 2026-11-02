@@ -1,0 +1,93 @@
+# Example Bug Bounty Program Profile
+# Generic template demonstrating multi-program capabilities (CIDR, IP, path exclusions, etc.)
+
+id: example-program
+name: "Example Security Program"
+version: "1.0.0"
+platform: "HackerOne"
+policy_url: "https://hackerone.com/example"
+description: "Demonstration profile for multi-program reconnaissance testing."
+
+scope:
+  enabled: true
+  allowed_domains:
+    - "example.com"
+    - "*.example.com"
+  excluded_domains:
+    - "out-of-scope.example.com"
+    - "*.out-of-scope.example.com"
+  allowed_ips:
+    - "192.168.1.100"
+  allowed_cidrs:
+    - "10.0.0.0/24"
+  excluded_ips:
+    - "10.0.0.254"
+  excluded_cidrs:
+    - "10.0.0.128/25"
+  allowed_paths: []
+  excluded_paths:
+    - "/logout"
+    - "/delete-account"
+    - "/admin/destroy"
+  allowed_protocols:
+    - "http"
+    - "https"
+  allowed_ports:
+    - 80
+    - 443
+    - 8000
+    - 8443
+  third_party_hosted_exclusions:
+    - "support.example.com"
+
+request_policy:
+  max_rps: 10.0
+  concurrency: 2
+  timeout: 25
+  max_retries: 2
+  crawl_depth: 2
+  burst: 2
+  verify_tls: true
+  strict_scope: true
+  per_host_rps: 5.0
+
+headers:
+  required:
+    X-Bug-Bounty: "${RESEARCHER_NAME}"
+  optional:
+    X-Security-Scan: "NightCrawler-v5"
+
+authentication:
+  type: "bearer"
+  token_env: "EXAMPLE_API_TOKEN"
+  header_name: "Authorization"
+  header_prefix: "Bearer "
+
+testing_permissions:
+  passive_recon: true
+  active_recon: true
+  endpoint_discovery: true
+  javascript_analysis: true
+  secret_detection: true
+  credential_validation: false
+  fuzzing: false
+  injection_testing: false
+  destructive_testing: false
+  denial_of_service: false
+  social_engineering: false
+
+tool_restrictions:
+  allowed_tools:
+    - "subfinder"
+    - "httpx"
+    - "gau"
+    - "waybackurls"
+    - "jsluice"
+  disabled_tools:
+    - "katana"
+    - "hakrawler"
+
+reporting:
+  default_template: "hackerone"
+  default_format: "html"
+  program_name: "Example Security Program"

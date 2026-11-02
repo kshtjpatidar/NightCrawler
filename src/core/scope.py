@@ -1,9 +1,10 @@
 """
 NightCrawler - Scope Enforcement Module
-Strict, configurable target scope validation with subdomain boundary checks.
+Strict, configurable multi-program target scope validation with CIDR, IP, wildcard,
+path exclusion, protocol, port, and third-party boundary checks.
 """
 
-from typing import List, Set, Optional, Iterable
+from typing import List, Set, Optional, Iterable, Dict, Any, Union
 from urllib.parse import urlparse
 import re
 import ipaddress
@@ -11,16 +12,26 @@ import ipaddress
 
 class ScopeManager:
     """
-    Manages and enforces strict target scope.
-    Validates hostnames and URLs against allowed and excluded domains
-    using strict suffix-boundary matching to prevent subdomain/lookalike bypasses.
+    Manages and enforces strict multi-program target scope.
+    Validates hostnames, IP addresses, CIDR ranges, paths, protocols, and ports.
+    Exclusions always take precedence over inclusions.
     """
 
     def __init__(
         self,
         allowed_domains: Optional[Iterable[str]] = None,
         excluded_domains: Optional[Iterable[str]] = None,
-        enabled: bool = True
+        enabled: bool = True,
+        # Multi-program extensions
+        allowed_ips: Optional[Iterable[str]] = None,
+        allowed_cidrs: Optional[Iterable[str]] = None,
+        excluded_ips: Optional[Iterable[str]] = None,
+        excluded_cidrs: Optional[Iterable[str]] = None,
+        allowed_paths: Optional[Iterable[str]] = None,
+        excluded_paths: Optional[Iterable[str]] = None,
+        allowed_protocols: Optional[Iterable[str]] = None,
+        allowed_ports: Optional[Iterable[int]] = None,
+        third_party_hosted_exclusions: Optional[Iterable[str]] = None
     ):
         self.enabled = enabled
         self.allowed_domains: Set[str] = set()
@@ -37,6 +48,74 @@ class ScopeManager:
                 clean = self._normalize_domain(domain)
                 if clean:
                     self.excluded_domains.add(clean)
+
+        # IP & CIDR handling
+        self.allowed_ips: Set[Union[ipaddress.IPv4Address, ipaddress.IPv6Address]] = set()
+        if allowed_ips:
+            for ip in allowed_ips:
+                try:
+                    self.allowed_ips.add(ipaddress.ip_address(ip.strip()))
+                except ValueError:
+                    pass
+
+        self.excluded_ips: Set[Union[ipaddress.IPv4Address, ipaddress.IPv6Address]] = set()
+        if excluded_ips:
+            for ip in excluded_ips:
+                try:
+                    self.excluded_ips.add(ipaddress.ip_address(ip.strip()))
+                except ValueError:
+                    pass
+
+        self.allowed_cidrs: List[Union[ipaddress.IPv4Network, ipaddress.IPv6Network]] = []
+        if allowed_cidrs:
+            for cidr in allowed_cidrs:
+                try:
+                    self.allowed_cidrs.append(ipaddress.ip_network(cidr.strip(), strict=False))
+                except ValueError:
+                    pass
+
+        self.excluded_cidrs: List[Union[ipaddress.IPv4Network, ipaddress.IPv6Network]] = []
+        if excluded_cidrs:
+            for cidr in excluded_cidrs:
+                try:
+                    self.excluded_cidrs.append(ipaddress.ip_network(cidr.strip(), strict=False))
+                except ValueError:
+                    pass
+
+        # Paths
+        self.allowed_paths: List[str] = [p.strip() for p in (allowed_paths or []) if p.strip()]
+        self.excluded_paths: List[str] = [p.strip() for p in (excluded_paths or []) if p.strip()]
+
+        # Protocols & Ports
+        self.allowed_protocols: Set[str] = {p.lower().strip() for p in (allowed_protocols or ["http", "https"])}
+        self.allowed_ports: Set[int] = {int(p) for p in (allowed_ports or [80, 443, 8080, 8443])}
+
+        # Third-party hosted service exclusions
+        self.third_party_hosted_exclusions: Set[str] = set()
+        if third_party_hosted_exclusions:
+            for h in third_party_hosted_exclusions:
+                clean = self._normalize_domain(h)
+                if clean:
+                    self.third_party_hosted_exclusions.add(clean)
+
+    @classmethod
+    def from_profile(cls, profile) -> "ScopeManager":
+        """Instantiate ScopeManager from a ProgramProfile object."""
+        sc = profile.scope
+        return cls(
+            allowed_domains=sc.allowed_domains,
+            excluded_domains=sc.excluded_domains,
+            enabled=sc.enabled,
+            allowed_ips=sc.allowed_ips,
+            allowed_cidrs=sc.allowed_cidrs,
+            excluded_ips=sc.excluded_ips,
+            excluded_cidrs=sc.excluded_cidrs,
+            allowed_paths=sc.allowed_paths,
+            excluded_paths=sc.excluded_paths,
+            allowed_protocols=sc.allowed_protocols,
+            allowed_ports=sc.allowed_ports,
+            third_party_hosted_exclusions=sc.third_party_hosted_exclusions
+        )
 
     @staticmethod
     def _normalize_domain(domain: str) -> str:
@@ -96,7 +175,7 @@ class ScopeManager:
         """
         if not host or not domain_pattern:
             return False
-        
+
         host = host.lower().rstrip(".")
         domain_pattern = domain_pattern.lower().rstrip(".")
 
@@ -108,8 +187,30 @@ class ScopeManager:
 
         return False
 
+    def is_ip_allowed(self, ip_obj: Union[ipaddress.IPv4Address, ipaddress.IPv6Address]) -> bool:
+        """Check if an IP address is within allowed IP/CIDR scope and not excluded."""
+        # 1. Check IP exclusions
+        if ip_obj in self.excluded_ips:
+            return False
+
+        # 2. Check CIDR exclusions
+        for exc_net in self.excluded_cidrs:
+            if ip_obj in exc_net:
+                return False
+
+        # 3. Check allowed IPs
+        if ip_obj in self.allowed_ips:
+            return True
+
+        # 4. Check allowed CIDRs
+        for inc_net in self.allowed_cidrs:
+            if ip_obj in inc_net:
+                return True
+
+        return False
+
     def is_host_allowed(self, host: Optional[str]) -> bool:
-        """Check if hostname is in allowed scope and not excluded."""
+        """Check if hostname or IP is in allowed scope and not excluded."""
         if not self.enabled:
             return True
 
@@ -118,13 +219,25 @@ class ScopeManager:
 
         host = host.lower().rstrip(".")
 
+        # Check if host is an IP address
+        try:
+            ip_obj = ipaddress.ip_address(host)
+            return self.is_ip_allowed(ip_obj)
+        except ValueError:
+            pass
+
+        # Check third-party hosted service exclusions
+        for tp in self.third_party_hosted_exclusions:
+            if self._matches_domain_pattern(host, tp):
+                return False
+
         # Explicit exclusions override allowed domains (including all subdomains)
         for excluded in self.excluded_domains:
             if self._matches_domain_pattern(host, excluded):
                 return False
 
-        # If no allowed domains configured, nothing is allowed when scope is enabled
-        if not self.allowed_domains:
+        # If no allowed domains/IPs/CIDRs configured, nothing is allowed when scope is enabled
+        if not self.allowed_domains and not self.allowed_ips and not self.allowed_cidrs:
             return False
 
         # Check if matches any allowed domain (exact or subdomain)
@@ -135,7 +248,7 @@ class ScopeManager:
         return False
 
     def is_url_in_scope(self, url: str) -> bool:
-        """Check if a full URL's hostname and scheme are within authorized scope."""
+        """Check if a full URL's hostname, scheme, port, and path are within authorized scope."""
         if not self.enabled:
             return True
 
@@ -149,17 +262,45 @@ class ScopeManager:
         if any(lower_url.startswith(bad) for bad in ("javascript:", "data:", "file:", "ftp:", "about:", "blob:", "ws:", "wss:")):
             return False
 
-        # Scheme must be http or https if specified
+        # Scheme check
+        scheme = "https"
         if "://" in url_str:
             scheme = url_str.split("://")[0].lower()
-            if scheme not in ("http", "https"):
+            if scheme not in self.allowed_protocols:
+                return False
+            url_to_parse = url_str
+        else:
+            url_to_parse = f"https://{url_str}"
+
+        try:
+            parsed = urlparse(url_to_parse)
+            host = parsed.hostname
+            if not host:
+                return False
+            host = host.lower().rstrip(".")
+
+            # Port check
+            port = parsed.port or (443 if scheme == "https" else 80)
+            if self.allowed_ports and port not in self.allowed_ports:
                 return False
 
-        host = self.extract_hostname(url_str)
-        if not host:
-            return False
+            # Host check
+            if not self.is_host_allowed(host):
+                return False
 
-        return self.is_host_allowed(host)
+            # Path check
+            path = parsed.path or "/"
+            for exc_path in self.excluded_paths:
+                if exc_path and path.startswith(exc_path):
+                    return False
+
+            if self.allowed_paths:
+                if not any(path.startswith(inc_path) for inc_path in self.allowed_paths):
+                    return False
+
+            return True
+        except Exception:
+            return False
 
     def filter_subdomains(self, subdomains: Iterable[str]) -> List[str]:
         """Filter list of subdomains/hostnames to only those strictly in scope."""
@@ -171,7 +312,7 @@ class ScopeManager:
         return sorted(list(set(valid)))
 
     def filter_urls(self, urls: Iterable[str]) -> List[str]:
-        """Filter list of URLs to only those whose hosts are strictly in scope."""
+        """Filter list of URLs to only those whose hosts and paths are strictly in scope."""
         valid = []
         seen = set()
         for url in urls:
