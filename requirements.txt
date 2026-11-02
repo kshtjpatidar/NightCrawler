@@ -1,5 +1,4 @@
-# NightCrawler - Advanced JS Secret Scanner
-# by CyberTechAjju | Keep Learning // Keep Hacking
+# NightCrawler v5.0 - Scope-Aware Bug Bounty Reconnaissance
 
 aiohttp>=3.9.0
 asyncio-throttle>=1.0.2

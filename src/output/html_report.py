@@ -1,7 +1,7 @@
 """
 NightCrawler v2.5 - Professional HTML Report Generator
 Multiple templates: HackerOne, BugCrowd, Email Format
-by CyberTechAjju | Keep Learning // Keep Hacking
+by kshtjpatidar | Keep Learning // Keep Hacking
 """
 
 from pathlib import Path

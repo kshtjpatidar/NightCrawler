@@ -2,7 +2,7 @@
 """
 NightCrawler v5.0 - Interactive Bug Bounty Reconnaissance Interface
 Full interactive configuration menu complying with bug bounty rules.
-by CyberTechAjju | Keep Learning // Keep Hacking
+by kshtjpatidar | Keep Learning // Keep Hacking
 """
 
 import os

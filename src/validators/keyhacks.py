@@ -12,7 +12,7 @@ This tool is designed for:
 DO NOT use this tool for unauthorized access or malicious purposes.
 The author is not responsible for any misuse of this tool.
 
-by CyberTechAjju | Keep Learning // Keep Hacking
+by kshtjpatidar | Keep Learning // Keep Hacking
 """
 
 import subprocess

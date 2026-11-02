@@ -6,10 +6,10 @@
 
 <br>
 
-[![Version](https://img.shields.io/badge/version-5.0-brightgreen.svg?style=for-the-badge)](https://github.com/cybertechajju/NightCrawler)
+[![Version](https://img.shields.io/badge/version-5.0-brightgreen.svg?style=for-the-badge)](https://github.com/kshtjpatidar/NightCrawler)
 [![Python](https://img.shields.io/badge/python-3.8+-blue.svg?style=for-the-badge&logo=python&logoColor=white)](https://python.org)
 [![License](https://img.shields.io/badge/license-MIT-yellow.svg?style=for-the-badge)](LICENSE)
-[![Stars](https://img.shields.io/github/stars/cybertechajju/NightCrawler?style=for-the-badge&logo=github)](https://github.com/cybertechajju/NightCrawler)
+[![Stars](https://img.shields.io/github/stars/kshtjpatidar/NightCrawler?style=for-the-badge&logo=github)](https://github.com/kshtjpatidar/NightCrawler)
 
 <br>
 
@@ -39,7 +39,7 @@
 ╚═╝  ╚═══╝╚═╝ ╚═════╝ ╚═╝  ╚═╝   ╚═╝    ╚═════╝╚═╝  ╚═╝╚═╝  ╚═╝ ╚══╝╚══╝ ╚══════╝╚══════╝╚═╝  ╚═╝
 
 ┌─────────────────────────────────────────────────────────────┐
-│ v5.0 │ All 9 Tools │ No Timeout │ 75+ KeyHacks │ CyberTechAjju │
+│ v5.0 │ Scope-Aware │ Max 5 RPS │ Bugcrowd VRT │ kshtjpatidar │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -104,7 +104,7 @@
 
 ```bash
 # Clone and enter directory
-git clone https://github.com/cybertechajju/NightCrawler.git
+git clone https://github.com/kshtjpatidar/NightCrawler.git
 cd NightCrawler
 
 # Install dependencies
@@ -123,7 +123,7 @@ That's it! The interactive mode will guide you through everything. 🎉
 ### Step 1: Clone Repository
 
 ```bash
-git clone https://github.com/cybertechajju/NightCrawler.git
+git clone https://github.com/kshtjpatidar/NightCrawler.git
 cd NightCrawler
 ```
 
@@ -419,10 +419,9 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 <div align="center">
 
-**CyberTechAjju**
+**kshtjpatidar**
 
-[![GitHub](https://img.shields.io/badge/GitHub-100000?style=for-the-badge&logo=github&logoColor=white)](https://github.com/cybertechajju)
-[![Twitter](https://img.shields.io/badge/Twitter-1DA1F2?style=for-the-badge&logo=twitter&logoColor=white)](https://twitter.com/cybertechajju)
+[![GitHub](https://img.shields.io/badge/GitHub-100000?style=for-the-badge&logo=github&logoColor=white)](https://github.com/kshtjpatidar)
 
 *Keep Learning // Keep Hacking* 🦇
 

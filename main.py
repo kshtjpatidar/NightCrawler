@@ -8,7 +8,7 @@
 ╚═╝  ╚═══╝╚═╝ ╚═════╝ ╚═╝  ╚═╝   ╚═╝    ╚═════╝╚═╝  ╚═╝╚═╝  ╚═╝ ╚══╝╚══╝ ╚══════╝╚══════╝╚═╝  ╚═╝
 
 NightCrawler v5.0 - Scope-Aware, Rate-Limited Bug Bounty Reconnaissance
-by CyberTechAjju | Keep Learning // Keep Hacking
+by kshtjpatidar | Keep Learning // Keep Hacking
 
 ⚠️ ETHICAL USE ONLY - For authorized security testing and bug bounty programs 
 """

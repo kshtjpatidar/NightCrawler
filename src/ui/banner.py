@@ -26,13 +26,13 @@ def print_banner():
     
     # Create info line
     info = Text()
-    info.append("v3.1", style="bold green")
+    info.append("v5.0", style="bold green")
     info.append(" │ ", style="dim")
-    info.append("Red Team JS Scanner", style="yellow")
+    info.append("Scope-Aware Recon", style="yellow")
     info.append(" │ ", style="dim")
-    info.append("75+ KeyHacks Validators", style="bold red")
+    info.append("Max 5 RPS", style="bold red")
     info.append(" │ ", style="dim")
-    info.append("CyberTechAjju", style="bold magenta")
+    info.append("kshtjpatidar", style="bold magenta")
     
     console.print(Panel(info, border_style="green", padding=(0, 2)))
     
@@ -41,11 +41,11 @@ def print_banner():
     features.append("🦇 ", style="bold")
     features.append("200+ Patterns", style="green")
     features.append("  •  ", style="dim")
-    features.append("Auto-Validate Secrets", style="red")
+    features.append("Scope Enforced", style="cyan")
     features.append("  •  ", style="dim")
-    features.append("Subdomain Scan", style="yellow")
+    features.append("Verified TLS", style="yellow")
     features.append("  •  ", style="dim") 
-    features.append("HackerOne Reports", style="cyan")
+    features.append("Bugcrowd Reports", style="magenta")
     
     console.print(Panel(features, border_style="dim", padding=(0, 1)))
     console.print("[dim]Keep Learning // Keep Hacking   •   ⚠️  Ethical Use Only[/dim]\n")
