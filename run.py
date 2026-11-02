@@ -225,8 +225,14 @@ def main():
                     console.print("[green]✓ Configuration saved to config.yaml[/]\n")
 
             elif choice == "5":
-                cfg.max_requests_per_second = FloatPrompt.ask("[bold cyan]Maximum requests per second[/]", default=cfg.max_requests_per_second)
-                console.print(f"[green]✓ Rate limit set to {cfg.max_requests_per_second} RPS[/]\n")
+                new_rps = FloatPrompt.ask("[bold cyan]Maximum requests per second (UXCam max: 5.0)[/]", default=cfg.max_requests_per_second)
+                if new_rps <= 0:
+                    console.print("[red]❌ Error: Rate limit must be positive (> 0)![/]\n")
+                elif cfg.is_uxcam_profile() and new_rps > 5.0:
+                    console.print(f"[red]❌ Error: UXCam bug bounty policy enforces a hard maximum of 5 requests per second (requested {new_rps})![/]\n")
+                else:
+                    cfg.max_requests_per_second = new_rps
+                    console.print(f"[green]✓ Rate limit set to {cfg.max_requests_per_second} RPS[/]\n")
 
             elif choice == "6":
                 cfg.concurrency = IntPrompt.ask("[bold cyan]Concurrency workers (1-5 recommended for 5 RPS)[/]", default=cfg.concurrency)

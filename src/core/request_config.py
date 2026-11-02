@@ -64,7 +64,29 @@ class NightCrawlerConfig:
             header_value_env=self.header_value_env
         )
 
+    def is_uxcam_profile(self) -> bool:
+        """Check if current profile/configuration targets UXCam."""
+        uxcam_domains = {"uxcam.com", "uxc.am"}
+        for domain in self.allowed_domains:
+            clean = domain.lower().lstrip(".*")
+            if any(clean == u or clean.endswith("." + u) for u in uxcam_domains):
+                return True
+        if "uxcam" in (self.program_name or "").lower():
+            return True
+        return False
+
+    def validate_rate_limit(self):
+        """Validate rate limit settings against bug bounty policy."""
+        if self.max_requests_per_second <= 0:
+            raise ValueError(f"max_requests_per_second must be positive (> 0), got {self.max_requests_per_second}")
+        if self.is_uxcam_profile() and self.max_requests_per_second > 5.0:
+            raise ValueError(
+                f"UXCam bug bounty policy enforces a strict maximum rate limit of 5 requests per second "
+                f"(requested {self.max_requests_per_second} RPS)."
+            )
+
     def get_rate_limiter(self) -> GlobalRateLimiter:
+        self.validate_rate_limit()
         return GlobalRateLimiter(
             max_requests_per_second=self.max_requests_per_second,
             burst=1  # Strict pacing, no bursts allowed

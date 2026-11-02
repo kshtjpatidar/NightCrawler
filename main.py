@@ -71,11 +71,12 @@ def show_scan_mode_menu():
 @click.option('--max-rps', default=None, type=float, help='Global maximum requests per second (default: 5.0)')
 @click.option('--allowed-domain', 'allowed_domains', multiple=True, help='Authorized domain pattern (e.g., uxcam.com, uxc.am)')
 @click.option('--excluded-domain', 'excluded_domains', multiple=True, help='Excluded domain pattern (e.g., tara.uxcam.com)')
+@click.option('--scope/--no-scope', 'scope_enabled', default=None, help='Enable/disable target scope enforcement (default: True)')
 @click.option('--verify-tls/--no-verify-tls', default=None, help='Verify TLS certificates (default: True)')
 @click.option('--strict-scope/--no-strict-scope', default=None, help='Enforce strict scope boundary checks (default: True)')
 # Researcher Header Options
 @click.option('--header-name', help='Custom researcher header name (e.g., X-User-Id)')
-@click.option('--header-value', help='Custom researcher header value (e.g., researcher email)')
+@click.option('--header-value', help='Custom researcher header value (prefer setting NIGHTCRAWLER_RESEARCHER_ID env var)')
 @click.option('--enable-header/--disable-header', default=None, help='Enable researcher identification header')
 # KeyHacks Validation
 @click.option('--validate-keys', is_flag=True, default=False, help='🔑 Auto-validate discovered secrets using KeyHacks (default: False)')
@@ -89,7 +90,7 @@ def show_scan_mode_menu():
 @click.version_option(version='5.0.0', prog_name='NightCrawler')
 def main(target, target_list, urls, output, concurrency, depth, timeout, 
          offline, patterns, verbose, quiet, config_file, mode, no_prompt,
-         max_rps, allowed_domains, excluded_domains, verify_tls, strict_scope,
+         max_rps, allowed_domains, excluded_domains, scope_enabled, verify_tls, strict_scope,
          header_name, header_value, enable_header, validate_keys, validate_timeout,
          template, reporter, reporter_email, program):
     """
@@ -116,9 +117,10 @@ def main(target, target_list, urls, output, concurrency, depth, timeout,
         cfg.max_requests_per_second = max_rps
     if verify_tls is not None:
         cfg.verify_tls = verify_tls
+    if scope_enabled is not None:
+        cfg.scope_enabled = scope_enabled
     if strict_scope is not None:
         cfg.strict_scope = strict_scope
-        cfg.scope_enabled = strict_scope
     if allowed_domains:
         cfg.allowed_domains = list(allowed_domains)
     if excluded_domains:
@@ -129,6 +131,15 @@ def main(target, target_list, urls, output, concurrency, depth, timeout,
         cfg.header_name = header_name
     if header_value:
         cfg.header_value = header_value
+        # Store into environment variable to ensure subprocesses and workers access it securely
+        header_env_key = cfg.header_value_env or "NIGHTCRAWLER_RESEARCHER_ID"
+        os.environ[header_env_key] = header_value
+        os.environ["NIGHTCRAWLER_HEADER_VALUE"] = header_value
+        if not quiet:
+            click.echo(click.style(
+                f"[dim]Notice: Passed researcher ID registered in environment ({header_env_key}).[/dim]",
+                dim=True
+            ))
     if template:
         cfg.default_template = template
     if reporter:
@@ -139,6 +150,19 @@ def main(target, target_list, urls, output, concurrency, depth, timeout,
         cfg.program_name = program
     if validate_keys:
         cfg.validate_keys = True
+
+    # P0: Validate Rate Limit (Reject non-positive RPS, enforce hard maximum of 5 for UXCam profile)
+    if cfg.max_requests_per_second <= 0:
+        click.echo(click.style(f"\n[!] ERROR: max-rps must be a positive number (> 0), got {cfg.max_requests_per_second}!\n", fg='red', bold=True))
+        sys.exit(1)
+
+    if cfg.is_uxcam_profile() and cfg.max_requests_per_second > 5.0:
+        click.echo(click.style(
+            f"\n[!] POLICY VIOLATION: UXCam bug bounty policy enforces a strict maximum rate limit of 5 requests per second "
+            f"(requested {cfg.max_requests_per_second} RPS)!\n",
+            fg='red', bold=True
+        ))
+        sys.exit(1)
 
     # P1: Reject insecure TLS configuration when strict mode is enabled
     if cfg.strict_scope and not cfg.verify_tls:
@@ -153,7 +177,7 @@ def main(target, target_list, urls, output, concurrency, depth, timeout,
         click.echo(click.style("└─────────────────────────────────────────────────────────────┘", fg='red'))
         click.echo(click.style("\n[*] Examples:", fg='cyan'))
         click.echo("    nightcrawler -t uxcam.com -o report.html")
-        click.echo("    nightcrawler -t uxcam.com --mode subdomains --header-value researcher@example.com")
+        click.echo("    export NIGHTCRAWLER_RESEARCHER_ID=researcher@example.com && nightcrawler -t uxcam.com --mode subdomains")
         click.echo("    nightcrawler --offline ./downloaded_js/ -o report.json")
         return
 
@@ -297,8 +321,10 @@ def main(target, target_list, urls, output, concurrency, depth, timeout,
                         finding.keyhacks_message = res.message
                         finding.keyhacks_command = res.validation_command or ""
                         if res.status == ValidationStatus.VALID:
+                            finding.credential_verified = True
                             scanner.results.keyhacks_valid += 1
                         elif res.status == ValidationStatus.INVALID:
+                            finding.credential_verified = False
                             scanner.results.keyhacks_invalid += 1
 
         # Report Generation

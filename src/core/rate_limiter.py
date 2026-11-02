@@ -16,6 +16,8 @@ class GlobalRateLimiter:
     """
 
     def __init__(self, max_requests_per_second: float = 5.0, burst: Optional[int] = None):
+        if max_requests_per_second <= 0:
+            raise ValueError(f"max_requests_per_second must be positive (> 0), got {max_requests_per_second}")
         self.rate = float(max_requests_per_second)
         # Prevent bursts if strict pacing is required; default burst capacity = 1
         self.max_tokens = float(burst if burst is not None else 1.0)

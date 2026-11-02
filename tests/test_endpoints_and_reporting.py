@@ -125,5 +125,15 @@ def test_bugcrowd_structured_report(tmp_path):
     assert "security_impact" in vuln
     assert "suggested_remediation" in vuln
 
+    # Verify pattern validation is distinguished from credential verification
+    assert "pattern_validation" in vuln
+    assert vuln["pattern_validation"]["is_syntax_valid"] is True
+    assert vuln["pattern_validation"]["validation_type"] == "offline_regex_entropy_pattern_match"
+    assert "credential_verification" in vuln
+    assert vuln["credential_verification"]["verified_against_live_api"] is False
+    assert vuln["credential_verification"]["verification_status"] == "NOT_CHECKED"
+    assert json_data["summary"]["pattern_validated_findings"] == 1
+    assert json_data["summary"]["credential_verified_findings"] == 0
+
     # Raw secret must NOT be in JSON!
     assert "AIzaSyD-9xEXAMPLE_SECRET_API_KEY_12345" not in json.dumps(json_data)

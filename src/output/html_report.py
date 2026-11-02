@@ -1087,43 +1087,85 @@ class HtmlReportGenerator:
         """
         Generate structured Bugcrowd-compatible vulnerability and recon report as JSON.
         All secret values and sensitive header tokens are strictly masked.
+        Cleanly distinguishes offline pattern validation from active live API credential verification.
         """
         severity_counts = {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0}
         vulnerabilities = []
+        pattern_validated_count = 0
+        credential_verified_count = 0
+
+        target_name = getattr(scan_result, 'target', 'authorized asset') if scan_result else 'authorized asset'
 
         for f in findings:
-            sev = f.severity() if hasattr(f, 'severity') else "MEDIUM"
+            is_dict = isinstance(f, dict)
+            pattern_name = f.get('pattern_name') if is_dict else getattr(f, 'pattern_name', 'Unknown')
+            matched_val = f.get('matched_value') if is_dict else getattr(f, 'matched_value', '')
+            url = f.get('url') if is_dict else getattr(f, 'url', '')
+            line_num = f.get('line_number') if is_dict else getattr(f, 'line_number', None)
+            context = f.get('context') if is_dict else getattr(f, 'context', None)
+
+            if is_dict:
+                sev = f.get('severity', 'MEDIUM')
+            else:
+                sev = f.severity() if hasattr(f, 'severity') else "MEDIUM"
             if sev in severity_counts:
                 severity_counts[sev] += 1
 
-            impact_info = get_impact_info(f.pattern_name)
+            # Distinguish pattern validation (offline regex/entropy) from credential verification (live API test)
+            pattern_validated = f.get('pattern_validated', f.get('validated', True)) if is_dict else getattr(f, 'pattern_validated', getattr(f, 'validated', True))
+            keyhacks_status = f.get('keyhacks_status', 'NOT_CHECKED') if is_dict else getattr(f, 'keyhacks_status', 'NOT_CHECKED')
+            keyhacks_msg = f.get('keyhacks_message', '') if is_dict else getattr(f, 'keyhacks_message', '')
+            is_cred_verified = (keyhacks_status == "VALID") or (f.get('credential_verified', False) if is_dict else getattr(f, 'credential_verified', False))
+
+            if pattern_validated:
+                pattern_validated_count += 1
+            if is_cred_verified:
+                credential_verified_count += 1
+
+            impact_info = get_impact_info(pattern_name)
             priority = {"CRITICAL": "P1", "HIGH": "P2", "MEDIUM": "P3", "LOW": "P4"}.get(sev, "P3")
-            masked_val = mask_secret(f.matched_value)
-            masked_ctx = f.context.replace(f.matched_value, masked_val) if (f.context and f.matched_value in f.context) else (f.context or "N/A")
+            masked_val = mask_secret(matched_val)
+            masked_ctx = context.replace(matched_val, masked_val) if (context and matched_val in context) else (context or "N/A")
 
             vulnerabilities.append({
-                "vulnerability_title": f"[{priority}] Potential {f.pattern_name} Exposure in Client-Side JavaScript",
-                "affected_asset": f.url,
+                "vulnerability_title": f"[{priority}] Potential {pattern_name} Exposure in Client-Side JavaScript",
+                "affected_asset": url,
                 "vulnerability_category": "Server Security Misconfiguration > Sensitive Data Exposure",
                 "severity": f"{priority} - {sev}",
                 "cvss_score": impact_info['cvss'],
+                "pattern_validation": {
+                    "is_syntax_valid": bool(pattern_validated),
+                    "validation_type": "offline_regex_entropy_pattern_match",
+                    "pattern_name": pattern_name,
+                    "description": "Validated against syntax and entropy characteristics offline without network calls."
+                },
+                "credential_verification": {
+                    "verified_against_live_api": bool(is_cred_verified),
+                    "verification_status": keyhacks_status,
+                    "verification_message": keyhacks_msg if keyhacks_msg else (
+                        "Active credential verification confirmed via live API call." if is_cred_verified
+                        else "Active credential verification disabled by default per bug bounty rules of engagement."
+                    )
+                },
                 "description": (
-                    f"During passive bug bounty reconnaissance of authorized asset {scan_result.target}, "
-                    f"a potential secret matching pattern '{f.pattern_name}' was identified within client-side JavaScript. "
-                    "Note: In accordance with responsible disclosure principles, credentials have NOT been validated or tested against external APIs."
+                    f"During passive bug bounty reconnaissance of authorized asset {target_name}, "
+                    f"a potential secret matching pattern '{pattern_name}' was identified within client-side JavaScript.\n"
+                    f"Pattern Validation: {'PASSED (syntax matches format definition)' if pattern_validated else 'UNCONFIRMED'}.\n"
+                    f"Credential Verification: {keyhacks_status} "
+                    f"({'Confirmed active credential via live API call' if is_cred_verified else 'Credential was NOT tested against live APIs per safe harbor rules'})."
                 ),
                 "preconditions": "Unauthenticated HTTPS network access to target asset.",
                 "reproduction_steps": [
-                    f"Fetch the target JavaScript file: curl -s \"{f.url}\"",
-                    f"Inspect line {f.line_number or 'within bundle'}",
+                    f"Fetch the target JavaScript file: curl -s \"{url}\"",
+                    f"Inspect line {line_num or 'within bundle'}",
                     f"Observe potential pattern match (masked): {masked_val}"
                 ],
                 "expected_result": "Client-side scripts should not expose API keys, private tokens, or sensitive credentials.",
-                "actual_result": f"Found potential secret matching pattern '{f.pattern_name}'. Masked token: {masked_val}",
+                "actual_result": f"Found potential secret matching pattern '{pattern_name}'. Masked token: {masked_val}",
                 "security_impact": impact_info['impact'],
                 "evidence_references": {
-                    "source_url": f.url,
-                    "line_number": f.line_number,
+                    "source_url": url,
+                    "line_number": line_num,
                     "masked_evidence": masked_val,
                     "context": masked_ctx
                 },
@@ -1131,32 +1173,35 @@ class HtmlReportGenerator:
             })
 
         endpoints_data = []
-        if hasattr(scan_result, 'discovered_endpoints') and scan_result.discovered_endpoints:
+        if scan_result and hasattr(scan_result, 'discovered_endpoints') and scan_result.discovered_endpoints:
             for ep in scan_result.discovered_endpoints:
                 endpoints_data.append({
-                    "url_or_path": ep.url_or_path if hasattr(ep, 'url_or_path') else str(ep),
-                    "method": ep.method if hasattr(ep, 'method') else "GET",
-                    "parameters": ep.parameters if hasattr(ep, 'parameters') else [],
-                    "endpoint_type": ep.endpoint_type if hasattr(ep, 'endpoint_type') else "general",
-                    "is_interesting": ep.is_interesting if hasattr(ep, 'is_interesting') else False
+                    "url_or_path": ep.url_or_path if hasattr(ep, 'url_or_path') else (ep.get('url_or_path') if isinstance(ep, dict) else str(ep)),
+                    "method": ep.method if hasattr(ep, 'method') else (ep.get('method', 'GET') if isinstance(ep, dict) else "GET"),
+                    "parameters": ep.parameters if hasattr(ep, 'parameters') else (ep.get('parameters', []) if isinstance(ep, dict) else []),
+                    "endpoint_type": ep.endpoint_type if hasattr(ep, 'endpoint_type') else (ep.get('endpoint_type', 'general') if isinstance(ep, dict) else "general"),
+                    "is_interesting": ep.is_interesting if hasattr(ep, 'is_interesting') else (ep.get('is_interesting', False) if isinstance(ep, dict) else False)
                 })
 
         return {
             "report_format": "bugcrowd",
             "version": "5.0",
             "metadata": {
-                "target": scan_result.target,
+                "target": getattr(scan_result, 'target', '') if scan_result else '',
                 "program_name": self.config.program_name or "Bug Bounty Program",
                 "reporter_name": self.config.reporter_name,
                 "timestamp": self.timestamp.isoformat(),
-                "scan_duration_seconds": round(scan_result.scan_time, 2)
+                "scan_duration_seconds": round(getattr(scan_result, 'scan_time', 0.0), 2) if scan_result else 0.0
             },
             "summary": {
                 "total_findings": len(findings),
+                "pattern_validated_findings": pattern_validated_count,
+                "credential_verified_findings": credential_verified_count,
+                "active_credential_verification_enabled": bool(getattr(self.config, 'validate_keys', False)),
                 "severity_breakdown": severity_counts,
-                "total_urls_scanned": scan_result.total_urls_scanned,
-                "total_js_files": scan_result.total_js_files,
-                "subdomains_found": scan_result.subdomains_found,
+                "total_urls_scanned": getattr(scan_result, 'total_urls_scanned', 0) if scan_result else 0,
+                "total_js_files": getattr(scan_result, 'total_js_files', 0) if scan_result else 0,
+                "subdomains_found": getattr(scan_result, 'subdomains_found', 0) if scan_result else 0,
                 "total_discovered_endpoints": len(endpoints_data)
             },
             "vulnerabilities": vulnerabilities,
@@ -1166,11 +1211,25 @@ class HtmlReportGenerator:
     def generate(self, findings: List, scan_result, output_path: str) -> str:
         """Generate report based on configured template and output extension."""
         output_file = Path(output_path)
+        if output_file.parent and not output_file.parent.exists():
+            output_file.parent.mkdir(parents=True, exist_ok=True)
         
         if output_file.suffix.lower() == '.json':
             report_dict = self.generate_bugcrowd_json(findings, scan_result)
             output_file.write_text(json.dumps(report_dict, indent=2), encoding='utf-8')
             return output_path
+
+        if self.config.template == "hackerone":
+            content = self.generate_hackerone_report(findings, scan_result)
+        elif self.config.template == "bugcrowd":
+            content = self.generate_bugcrowd_report(findings, scan_result)
+        elif self.config.template == "email":
+            content = self.generate_email_report(findings, scan_result)
+        else:
+            content = self.generate_bugcrowd_report(findings, scan_result)
+        
+        # Save to file
+        output_file.write_text(content, encoding='utf-8')
 
         if self.config.template == "hackerone":
             content = self.generate_hackerone_report(findings, scan_result)

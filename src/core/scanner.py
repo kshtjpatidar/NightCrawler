@@ -48,7 +48,9 @@ class Finding:
     category: str
     matched_value: str
     confidence: int
-    validated: bool = True
+    validated: bool = True  # Backwards compatibility: syntax pattern validation status
+    pattern_validated: bool = True  # Local offline syntax/regex/entropy pattern validation
+    credential_verified: bool = False  # Active validation against external API (disabled by default)
     line_number: Optional[int] = None
     context: Optional[str] = None
     # KeyHacks validation fields
@@ -69,7 +71,7 @@ class Finding:
     
     def is_keyhacks_valid(self) -> bool:
         """Check if KeyHacks validation confirmed the secret is valid"""
-        return self.keyhacks_status == "VALID"
+        return self.keyhacks_status == "VALID" or self.credential_verified
 
 
 @dataclass
@@ -343,6 +345,8 @@ class NightCrawlerScanner:
                     matched_value=str(match)[:100],
                     confidence=pattern.confidence,
                     validated=is_valid,
+                    pattern_validated=is_valid,
+                    credential_verified=False,
                     line_number=line_num,
                     context=context
                 )
