@@ -1,0 +1,71 @@
+"""
+NightCrawler - Global Rate Limiter Module
+Thread-safe and async-safe global request rate limiter enforcing strict requests-per-second (RPS).
+"""
+
+import asyncio
+import time
+from typing import Optional
+
+
+class GlobalRateLimiter:
+    """
+    Centralized asynchronous token-bucket rate limiter.
+    Ensures that total requests across all concurrent coroutines and workers
+    never exceed max_requests_per_second.
+    """
+
+    def __init__(self, max_requests_per_second: float = 5.0, burst: Optional[int] = None):
+        self.rate = float(max_requests_per_second)
+        # Prevent bursts if strict pacing is required; default burst capacity = 1
+        self.max_tokens = float(burst if burst is not None else 1.0)
+        self.tokens = self.max_tokens
+        self.last_updated = time.monotonic()
+        self._lock: Optional[asyncio.Lock] = None
+        self._total_requests_acquired = 0
+
+    def _get_lock(self) -> asyncio.Lock:
+        if self._lock is None:
+            self._lock = asyncio.Lock()
+        return self._lock
+
+    async def acquire(self):
+        """
+        Wait until a request token is available.
+        Ensures strict RPS compliance even under heavy concurrency.
+        """
+        if self.rate <= 0:
+            return
+
+        lock = self._get_lock()
+        while True:
+            async with lock:
+                now = time.monotonic()
+                elapsed = now - self.last_updated
+                self.last_updated = now
+
+                # Refill tokens based on elapsed time
+                self.tokens = min(self.max_tokens, self.tokens + elapsed * self.rate)
+
+                if self.tokens >= 1.0:
+                    self.tokens -= 1.0
+                    self._total_requests_acquired += 1
+                    return
+                else:
+                    # Calculate sleep time needed to get at least 1 token
+                    needed = 1.0 - self.tokens
+                    wait_time = needed / self.rate
+
+            # Sleep outside the lock so other coroutines can check their state when awakened
+            await asyncio.sleep(wait_time)
+
+    async def __aenter__(self):
+        await self.acquire()
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        pass
+
+    @property
+    def total_requests(self) -> int:
+        return self._total_requests_acquired

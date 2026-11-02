@@ -1,6 +1,6 @@
 """
 NightCrawler v5.0 - External Tool Integrations
-All recon tools with auto-detect paths and no timeouts
+Scope-aware, rate-limited recon tools with custom headers and compliance controls.
 """
 
 import subprocess
@@ -9,6 +9,9 @@ import os
 from pathlib import Path
 from typing import List, Optional, Dict
 from rich.console import Console
+
+from src.core.scope import ScopeManager
+from src.core.header_manager import HeaderManager
 
 console = Console()
 
@@ -103,20 +106,26 @@ def get_all_tool_paths() -> Dict[str, Optional[str]]:
 
 
 class SubfinderIntegration:
-    """Wrapper for Subfinder subdomain enumeration"""
+    """Wrapper for Subfinder subdomain enumeration with scope enforcement"""
     
-    def __init__(self, tool_path: Optional[str] = None):
+    def __init__(self, tool_path: Optional[str] = None, scope_manager: Optional[ScopeManager] = None):
         self.tool_path = tool_path or find_tool('subfinder')
+        self.scope_manager = scope_manager
     
     def is_available(self) -> bool:
         return self.tool_path is not None and Path(self.tool_path).exists()
     
     def enumerate(self, domain: str, recursive: bool = True, silent: bool = True) -> List[str]:
-        """Run Subfinder - NO TIMEOUT for full enumeration"""
+        """Run Subfinder with scope validation of results"""
         if not self.is_available():
             console.print("[yellow][!] Subfinder not found. Skipping subdomain enumeration.[/]")
-            return [domain]
+            return [domain] if (not self.scope_manager or self.scope_manager.is_host_allowed(domain)) else []
         
+        # Verify target domain itself is in scope
+        if self.scope_manager and not self.scope_manager.is_host_allowed(domain):
+            console.print(f"[red][!] Target domain '{domain}' is out-of-scope. Aborting subdomain scan.[/]")
+            return []
+
         cmd = [self.tool_path, '-d', domain]
         if recursive:
             cmd.extend(['-all', '-recursive'])
@@ -127,46 +136,82 @@ class SubfinderIntegration:
             console.print(f"[cyan][*] Running Subfinder on {domain}...[/]")
             result = subprocess.run(cmd, capture_output=True, text=True)
             
+            raw_subdomains = []
             if result.returncode == 0:
-                subdomains = [line.strip() for line in result.stdout.strip().split('\n') if line.strip()]
-                console.print(f"[green][+] Found {len(subdomains)} subdomains[/]")
-                return subdomains if subdomains else [domain]
-            else:
-                console.print(f"[yellow][!] Subfinder returned no results[/]")
-                return [domain]
+                raw_subdomains = [line.strip() for line in result.stdout.strip().split('\n') if line.strip()]
+            
+            if not raw_subdomains:
+                raw_subdomains = [domain]
+
+            # Strictly filter results against authorized scope
+            if self.scope_manager:
+                valid_subdomains = self.scope_manager.filter_subdomains(raw_subdomains)
+                filtered_out = len(raw_subdomains) - len(valid_subdomains)
+                if filtered_out > 0:
+                    console.print(f"[yellow][!] Filtered out {filtered_out} out-of-scope subdomains[/]")
+                console.print(f"[green][+] Found {len(valid_subdomains)} in-scope subdomains[/]")
+                return valid_subdomains
+            
+            return raw_subdomains
                 
         except Exception as e:
             console.print(f"[red][!] Error running Subfinder: {e}[/]")
-            return [domain]
+            return [domain] if (not self.scope_manager or self.scope_manager.is_host_allowed(domain)) else []
 
 
 class KatanaIntegration:
-    """Wrapper for Katana web crawler"""
+    """Wrapper for Katana web crawler with strict scope, rate limiting, and custom headers"""
     
-    def __init__(self, tool_path: Optional[str] = None):
+    def __init__(
+        self,
+        tool_path: Optional[str] = None,
+        scope_manager: Optional[ScopeManager] = None,
+        header_manager: Optional[HeaderManager] = None,
+        max_rps: float = 5.0
+    ):
         self.tool_path = tool_path or find_tool('katana')
+        self.scope_manager = scope_manager
+        self.header_manager = header_manager
+        self.max_rps = max_rps
     
     def is_available(self) -> bool:
         return self.tool_path is not None and Path(self.tool_path).exists()
     
-    def crawl(self, targets: List[str], depth: int = 3, js_only: bool = True) -> List[str]:
-        """Crawl targets - NO TIMEOUT for full deep crawl"""
+    def crawl(self, targets: List[str], depth: int = 2, js_only: bool = True) -> List[str]:
+        """Crawl targets with rate limiting, scope filtering, and researcher headers"""
         if not self.is_available():
             console.print("[yellow][!] Katana not found. Skipping deep crawl.[/]")
             return []
+
+        # Filter input targets to in-scope only
+        in_scope_targets = self.scope_manager.filter_urls(targets) if self.scope_manager else targets
+        if not in_scope_targets:
+            console.print("[yellow][!] No in-scope targets for Katana crawl.[/]")
+            return []
+
+        # Concurrency 1 and rate limit max 5 req/s (or configured max_rps)
+        rate_limit_val = max(1, int(self.max_rps))
+        cmd = [self.tool_path, '-d', str(depth), '-c', '1', '-rl', str(rate_limit_val), '-silent']
         
-        cmd = [self.tool_path, '-d', str(depth), '-c', '50', '-silent']
         if js_only:
             cmd.append('-jc')
+
+        # Add researcher header if active
+        if self.header_manager and self.header_manager.is_active():
+            header_flag = self.header_manager.format_cli_header_flag()
+            if header_flag:
+                cmd.extend(['-H', header_flag])
         
         try:
-            console.print(f"[cyan][*] Running Katana crawler (depth={depth})...[/]")
-            result = subprocess.run(cmd, input='\n'.join(targets), capture_output=True, text=True)
+            console.print(f"[cyan][*] Running Katana crawler (depth={depth}, rate-limit={rate_limit_val} rps)...[/]")
+            result = subprocess.run(cmd, input='\n'.join(in_scope_targets), capture_output=True, text=True)
             
             if result.returncode == 0:
-                urls = [line.strip() for line in result.stdout.strip().split('\n') if line.strip()]
-                console.print(f"[green][+] Katana found {len(urls)} URLs[/]")
-                return urls
+                raw_urls = [line.strip() for line in result.stdout.strip().split('\n') if line.strip()]
+                # Strictly filter crawled URLs against scope
+                in_scope_urls = self.scope_manager.filter_urls(raw_urls) if self.scope_manager else raw_urls
+                console.print(f"[green][+] Katana found {len(in_scope_urls)} in-scope URLs[/]")
+                return in_scope_urls
             return []
                 
         except Exception as e:
@@ -175,30 +220,39 @@ class KatanaIntegration:
 
 
 class GauIntegration:
-    """Wrapper for GAU (GetAllURLs)"""
+    """Wrapper for GAU (GetAllURLs) with scope filtering"""
     
-    def __init__(self, tool_path: Optional[str] = None):
+    def __init__(self, tool_path: Optional[str] = None, scope_manager: Optional[ScopeManager] = None):
         self.tool_path = tool_path or find_tool('gau')
+        self.scope_manager = scope_manager
     
     def is_available(self) -> bool:
         return self.tool_path is not None and Path(self.tool_path).exists()
     
-    def fetch(self, domains: List[str], threads: int = 5) -> List[str]:
-        """Fetch archived URLs - NO TIMEOUT"""
+    def fetch(self, domains: List[str], threads: int = 2) -> List[str]:
+        """Fetch archived URLs from public archives with strict output scope filtering"""
         if not self.is_available():
             console.print("[yellow][!] GAU not found. Skipping archive search.[/]")
             return []
-        
+
+        # Filter target domains
+        in_scope_domains = self.scope_manager.filter_subdomains(domains) if self.scope_manager else domains
+        if not in_scope_domains:
+            return []
+
         cmd = [self.tool_path, '--threads', str(threads)]
         
         try:
             console.print(f"[cyan][*] Fetching archived URLs with GAU...[/]")
-            result = subprocess.run(cmd, input='\n'.join(domains), capture_output=True, text=True)
+            result = subprocess.run(cmd, input='\n'.join(in_scope_domains), capture_output=True, text=True)
             
             if result.returncode == 0:
                 urls = [line.strip() for line in result.stdout.strip().split('\n') if line.strip()]
                 js_urls = [u for u in urls if '.js' in u.lower()]
-                console.print(f"[green][+] GAU found {len(js_urls)} JS URLs from archives[/]")
+                # Strictly filter against scope so out-of-scope archive links are rejected
+                if self.scope_manager:
+                    js_urls = self.scope_manager.filter_urls(js_urls)
+                console.print(f"[green][+] GAU found {len(js_urls)} in-scope JS URLs from archives[/]")
                 return js_urls
             return []
                 
@@ -208,28 +262,35 @@ class GauIntegration:
 
 
 class WaybackurlsIntegration:
-    """Wrapper for Waybackurls"""
+    """Wrapper for Waybackurls with scope filtering"""
     
-    def __init__(self, tool_path: Optional[str] = None):
+    def __init__(self, tool_path: Optional[str] = None, scope_manager: Optional[ScopeManager] = None):
         self.tool_path = tool_path or find_tool('waybackurls')
+        self.scope_manager = scope_manager
     
     def is_available(self) -> bool:
         return self.tool_path is not None and Path(self.tool_path).exists()
     
     def fetch(self, domains: List[str]) -> List[str]:
-        """Fetch Wayback Machine URLs - NO TIMEOUT"""
+        """Fetch Wayback Machine URLs with strict scope filtering"""
         if not self.is_available():
             console.print("[yellow][!] Waybackurls not found. Skipping.[/]")
+            return []
+
+        in_scope_domains = self.scope_manager.filter_subdomains(domains) if self.scope_manager else domains
+        if not in_scope_domains:
             return []
         
         try:
             console.print(f"[cyan][*] Fetching Wayback URLs...[/]")
-            result = subprocess.run([self.tool_path], input='\n'.join(domains), capture_output=True, text=True)
+            result = subprocess.run([self.tool_path], input='\n'.join(in_scope_domains), capture_output=True, text=True)
             
             if result.returncode == 0:
                 urls = [line.strip() for line in result.stdout.strip().split('\n') if line.strip()]
                 js_urls = [u for u in urls if '.js' in u.lower()]
-                console.print(f"[green][+] Waybackurls found {len(js_urls)} JS URLs[/]")
+                if self.scope_manager:
+                    js_urls = self.scope_manager.filter_urls(js_urls)
+                console.print(f"[green][+] Waybackurls found {len(js_urls)} in-scope JS URLs[/]")
                 return js_urls
             return []
                 
@@ -239,112 +300,140 @@ class WaybackurlsIntegration:
 
 
 class SubJSIntegration:
-    """Wrapper for SubJS - fetches JS from subdomains"""
+    """Wrapper for SubJS with compliance mode awareness"""
     
-    def __init__(self, tool_path: Optional[str] = None):
+    def __init__(self, tool_path: Optional[str] = None, scope_manager: Optional[ScopeManager] = None, strict_mode: bool = True):
         self.tool_path = tool_path or find_tool('subjs')
+        self.scope_manager = scope_manager
+        self.strict_mode = strict_mode
     
     def is_available(self) -> bool:
         return self.tool_path is not None and Path(self.tool_path).exists()
     
     def fetch(self, urls: List[str]) -> List[str]:
-        """Fetch JS files from URLs - NO TIMEOUT"""
+        """Fetch JS files from URLs"""
+        if self.strict_mode:
+            console.print("[yellow][i] SubJS disabled in strict compliance mode (cannot enforce 5 RPS or custom headers). Using internal HTTP client instead.[/]")
+            return []
+
         if not self.is_available():
-            console.print("[yellow][!] SubJS not found. Skipping.[/]")
             return []
         
+        in_scope = self.scope_manager.filter_urls(urls) if self.scope_manager else urls
+        if not in_scope:
+            return []
+
         try:
             console.print(f"[cyan][*] Fetching JS with SubJS...[/]")
-            result = subprocess.run([self.tool_path], input='\n'.join(urls), capture_output=True, text=True)
+            result = subprocess.run([self.tool_path], input='\n'.join(in_scope), capture_output=True, text=True)
             
             if result.returncode == 0:
                 js_urls = [line.strip() for line in result.stdout.strip().split('\n') if line.strip()]
-                console.print(f"[green][+] SubJS found {len(js_urls)} JS files[/]")
+                if self.scope_manager:
+                    js_urls = self.scope_manager.filter_urls(js_urls)
                 return js_urls
             return []
-                
         except Exception as e:
             console.print(f"[red][!] Error running SubJS: {e}[/]")
             return []
 
 
 class HakrawlerIntegration:
-    """Wrapper for Hakrawler web crawler"""
+    """Wrapper for Hakrawler with compliance mode awareness"""
     
-    def __init__(self, tool_path: Optional[str] = None):
+    def __init__(self, tool_path: Optional[str] = None, scope_manager: Optional[ScopeManager] = None, strict_mode: bool = True):
         self.tool_path = tool_path or find_tool('hakrawler')
+        self.scope_manager = scope_manager
+        self.strict_mode = strict_mode
     
     def is_available(self) -> bool:
         return self.tool_path is not None and Path(self.tool_path).exists()
     
-    def crawl(self, urls: List[str], depth: int = 2) -> List[str]:
-        """Crawl URLs - NO TIMEOUT"""
+    def crawl(self, urls: List[str], depth: int = 1) -> List[str]:
+        """Crawl URLs with compliance checking"""
+        if self.strict_mode:
+            console.print("[yellow][i] Hakrawler disabled in strict compliance mode (cannot guarantee 5 RPS limit). Using rate-limited Katana / internal crawler instead.[/]")
+            return []
+
         if not self.is_available():
-            console.print("[yellow][!] Hakrawler not found. Skipping.[/]")
             return []
         
-        cmd = [self.tool_path, '-d', str(depth), '-t', '20']
+        in_scope = self.scope_manager.filter_urls(urls) if self.scope_manager else urls
+        if not in_scope:
+            return []
+
+        cmd = [self.tool_path, '-d', str(depth), '-t', '1']
         
         try:
             console.print(f"[cyan][*] Running Hakrawler...[/]")
-            result = subprocess.run(cmd, input='\n'.join(urls), capture_output=True, text=True)
+            result = subprocess.run(cmd, input='\n'.join(in_scope), capture_output=True, text=True)
             
             if result.returncode == 0:
                 all_urls = [line.strip() for line in result.stdout.strip().split('\n') if line.strip()]
                 js_urls = [u for u in all_urls if '.js' in u.lower()]
-                console.print(f"[green][+] Hakrawler found {len(js_urls)} JS URLs[/]")
+                if self.scope_manager:
+                    js_urls = self.scope_manager.filter_urls(js_urls)
                 return js_urls
             return []
-                
         except Exception as e:
             console.print(f"[red][!] Error running Hakrawler: {e}[/]")
             return []
 
 
 class GetJSIntegration:
-    """Wrapper for GetJS - extracts JS from pages"""
+    """Wrapper for GetJS with compliance mode awareness"""
     
-    def __init__(self, tool_path: Optional[str] = None):
+    def __init__(self, tool_path: Optional[str] = None, scope_manager: Optional[ScopeManager] = None, strict_mode: bool = True):
         self.tool_path = tool_path or find_tool('getJS') or find_tool('getjs')
+        self.scope_manager = scope_manager
+        self.strict_mode = strict_mode
     
     def is_available(self) -> bool:
         return self.tool_path is not None and Path(self.tool_path).exists()
     
     def extract(self, urls: List[str]) -> List[str]:
-        """Extract JS from URLs - NO TIMEOUT"""
+        """Extract JS from URLs with compliance checking"""
+        if self.strict_mode:
+            console.print("[yellow][i] GetJS disabled in strict compliance mode (cannot enforce 5 RPS limit or headers). Using internal HTTP client instead.[/]")
+            return []
+
         if not self.is_available():
-            console.print("[yellow][!] GetJS not found. Skipping.[/]")
             return []
         
+        in_scope = self.scope_manager.filter_urls(urls) if self.scope_manager else urls
+        if not in_scope:
+            return []
+
         cmd = [self.tool_path, '--complete']
         
         try:
             console.print(f"[cyan][*] Extracting JS with GetJS...[/]")
-            result = subprocess.run(cmd, input='\n'.join(urls), capture_output=True, text=True)
+            result = subprocess.run(cmd, input='\n'.join(in_scope), capture_output=True, text=True)
             
             if result.returncode == 0:
                 js_urls = [line.strip() for line in result.stdout.strip().split('\n') if line.strip()]
-                console.print(f"[green][+] GetJS found {len(js_urls)} JS files[/]")
+                if self.scope_manager:
+                    js_urls = self.scope_manager.filter_urls(js_urls)
                 return js_urls
             return []
-                
         except Exception as e:
             console.print(f"[red][!] Error running GetJS: {e}[/]")
             return []
 
 
 class JSLuiceIntegration:
-    """Wrapper for JSLuice - extracts secrets from JS"""
+    """Wrapper for JSLuice - extracts endpoints and secrets from JS content (offline parser)"""
     
-    def __init__(self, tool_path: Optional[str] = None):
+    def __init__(self, tool_path: Optional[str] = None, scope_manager: Optional[ScopeManager] = None):
         self.tool_path = tool_path or find_tool('jsluice')
+        self.scope_manager = scope_manager
     
     def is_available(self) -> bool:
         return self.tool_path is not None and Path(self.tool_path).exists()
     
     def extract_urls(self, js_content: str) -> List[str]:
-        """Extract URLs from JS content"""
-        if not self.is_available():
+        """Extract URLs from JS content offline and filter by scope"""
+        if not self.is_available() or not js_content:
             return []
         
         cmd = [self.tool_path, 'urls']
@@ -352,14 +441,17 @@ class JSLuiceIntegration:
         try:
             result = subprocess.run(cmd, input=js_content, capture_output=True, text=True)
             if result.returncode == 0:
-                return [line.strip() for line in result.stdout.strip().split('\n') if line.strip()]
+                urls = [line.strip() for line in result.stdout.strip().split('\n') if line.strip()]
+                if self.scope_manager:
+                    urls = self.scope_manager.filter_urls(urls)
+                return urls
             return []
         except:
             return []
     
     def extract_secrets(self, js_content: str) -> List[dict]:
-        """Extract secrets from JS content"""
-        if not self.is_available():
+        """Extract secrets from JS content offline"""
+        if not self.is_available() or not js_content:
             return []
         
         cmd = [self.tool_path, 'secrets']

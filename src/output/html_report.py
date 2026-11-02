@@ -15,11 +15,11 @@ import json
 @dataclass
 class ReportConfig:
     """Configuration for report generation"""
-    reporter_name: str = "CyberTechAjju"
+    reporter_name: str = "Security Researcher"
     reporter_email: str = ""
     reporter_username: str = ""
     program_name: str = ""
-    template: str = "hackerone"  # hackerone, bugcrowd, email
+    template: str = "bugcrowd"  # bugcrowd, hackerone, email
     include_poc: bool = True
     include_remediation: bool = True
 
@@ -204,6 +204,21 @@ def get_impact_info(pattern_name: str) -> Dict:
         "impact": "Potential information disclosure or unauthorized access. The exposed secret may provide access to protected resources or sensitive functionality.",
         "remediation": "1. Identify the purpose of this credential\n2. Rotate or revoke the secret immediately\n3. Review access logs for unauthorized usage\n4. Implement proper secrets management"
     }
+
+
+def mask_secret(value: str) -> str:
+    """
+    Mask sensitive credentials so raw API keys, passwords, and tokens
+    are NEVER leaked into reports or terminal output.
+    """
+    if not value:
+        return ""
+    val = str(value).strip()
+    if len(val) <= 6:
+        return "*" * len(val)
+    prefix = val[:3]
+    suffix = val[-3:]
+    return f"{prefix}{'*' * (len(val) - 6)}{suffix}"
 
 
 class HtmlReportGenerator:
@@ -724,9 +739,9 @@ class HtmlReportGenerator:
                 <!-- Proof of Concept -->
                 <div class="finding-section">
                     <div class="section-title">Proof of Concept</div>
-                    <p style="margin-bottom: 10px; color: #94a3b8;">Secret Value Found:</p>
-                    <div class="code-block">{self._escape(finding.matched_value)}</div>
-                    {f'<p style="margin-top: 15px; color: #94a3b8;">Context:</p><div class="code-block">{self._escape(finding.context)}</div>' if finding.context else ''}
+                    <p style="margin-bottom: 10px; color: #94a3b8;">Secret Value Found (Masked for Security):</p>
+                    <div class="code-block">{self._escape(mask_secret(finding.matched_value))}</div>
+                    {f'<p style="margin-top: 15px; color: #94a3b8;">Context:</p><div class="code-block">{self._escape(finding.context.replace(finding.matched_value, mask_secret(finding.matched_value)) if finding.matched_value in finding.context else finding.context)}</div>' if finding.context else ''}
                 </div>
                 
                 <!-- Steps to Reproduce -->
@@ -843,43 +858,94 @@ class HtmlReportGenerator:
             impact_info = get_impact_info(finding.pattern_name)
             severity = finding.severity() if hasattr(finding, 'severity') else impact_info['severity']
             priority = {"CRITICAL": "P1", "HIGH": "P2", "MEDIUM": "P3", "LOW": "P4"}.get(severity, "P3")
+            masked_val = mask_secret(finding.matched_value)
+            line_str = f"Line {finding.line_number}" if finding.line_number else "Location within bundle"
+            masked_ctx = finding.context.replace(finding.matched_value, masked_val) if (finding.context and finding.matched_value in finding.context) else (finding.context or "N/A")
             
             html_content += f"""
         <div class="finding-card">
             <div class="finding-header">
-                <div class="finding-title">[{priority}] {self._escape(finding.pattern_name)} in JavaScript Source</div>
+                <div class="finding-title">[{priority}] Potential {self._escape(finding.pattern_name)} Exposure in Client-Side JavaScript</div>
                 {self._get_severity_badge(severity)}
             </div>
             <div class="finding-body">
                 <div class="finding-section">
-                    <div class="section-title">Overview</div>
+                    <div class="section-title">Vulnerability Title</div>
+                    <div class="section-content">Potential {self._escape(finding.pattern_name)} Exposure in Client-Side JavaScript</div>
+                </div>
+
+                <div class="finding-section">
+                    <div class="section-title">Affected Asset</div>
+                    <div class="section-content"><code>{self._escape(finding.url)}</code></div>
+                </div>
+
+                <div class="finding-section">
+                    <div class="section-title">Vulnerability Category</div>
+                    <div class="section-content">Server Security Misconfiguration &gt; Sensitive Data Exposure (VRT)</div>
+                </div>
+
+                <div class="finding-section">
+                    <div class="section-title">Severity</div>
+                    <div class="section-content"><strong>{priority} - {severity}</strong> (CVSS: {impact_info['cvss']})</div>
+                </div>
+
+                <div class="finding-section">
+                    <div class="section-title">Description</div>
                     <div class="section-content">
-                        A {self._escape(finding.pattern_name)} was discovered exposed in client-side JavaScript, potentially allowing unauthorized access to sensitive resources. The vulnerability was found in {self._escape(finding.category)} category with {finding.confidence}% confidence.
+                        During passive bug bounty reconnaissance of authorized asset <code>{self._escape(scan_result.target)}</code>, 
+                        a potential credential or token matching the pattern <strong>{self._escape(finding.pattern_name)}</strong> 
+                        was identified within client-side JavaScript. 
+                        <em>Note: In accordance with responsible disclosure principles, credentials have NOT been validated, tested, or executed against any external APIs.</em>
                     </div>
                 </div>
-                
+
                 <div class="finding-section">
-                    <div class="section-title">Technical Details</div>
-                    <table class="info-table">
-                        <tr><th>VRT Category</th><td>Server Security Misconfiguration > Sensitive Data Exposure</td></tr>
-                        <tr><th>Location</th><td class="url-display">{self._escape(finding.url)}</td></tr>
-                        <tr><th>Secret Type</th><td>{self._escape(finding.pattern_name)}</td></tr>
-                        <tr><th>CVSS</th><td>{impact_info['cvss']}</td></tr>
-                    </table>
+                    <div class="section-title">Preconditions</div>
+                    <div class="section-content">
+                        Unauthenticated HTTPS network access to the target host and ability to retrieve public client-side JavaScript assets.
+                    </div>
                 </div>
-                
+
                 <div class="finding-section">
-                    <div class="section-title">Proof of Concept</div>
-                    <div class="code-block">{self._escape(finding.matched_value)}</div>
+                    <div class="section-title">Reproduction Steps</div>
+                    <ol class="steps-list" style="margin-left: 20px; padding-left: 10px;">
+                        <li>Fetch the target JavaScript file: <code>curl -s "{self._escape(finding.url)}"</code></li>
+                        <li>Search for the pattern or inspect <code>{line_str}</code>.</li>
+                        <li>Observe the exposed credential token in source: <code>{self._escape(masked_val)}</code></li>
+                    </ol>
                 </div>
-                
+
                 <div class="finding-section">
-                    <div class="section-title">Business Impact</div>
+                    <div class="section-title">Expected Result</div>
+                    <div class="section-content">
+                        Client-side JavaScript assets should not contain private tokens, backend API secrets, or sensitive configuration keys.
+                    </div>
+                </div>
+
+                <div class="finding-section">
+                    <div class="section-title">Actual Result</div>
+                    <div class="section-content">
+                        Found potential secret matching pattern <strong>{self._escape(finding.pattern_name)}</strong> exposed in public code. Masked token value: <code>{self._escape(masked_val)}</code>.
+                    </div>
+                </div>
+
+                <div class="finding-section">
+                    <div class="section-title">Security Impact</div>
                     <div class="section-content">{self._escape(impact_info['impact'])}</div>
                 </div>
-                
+
                 <div class="finding-section">
-                    <div class="section-title">Mitigation Steps</div>
+                    <div class="section-title">Evidence References</div>
+                    <table class="info-table">
+                        <tr><th>Source Asset</th><td class="url-display">{self._escape(finding.url)}</td></tr>
+                        <tr><th>Line Number</th><td>{self._escape(str(finding.line_number or 'N/A'))}</td></tr>
+                        <tr><th>Masked Evidence</th><td class="code-block">{self._escape(masked_val)}</td></tr>
+                        <tr><th>Surrounding Context</th><td class="code-block">{self._escape(masked_ctx)}</td></tr>
+                    </table>
+                </div>
+
+                <div class="finding-section">
+                    <div class="section-title">Suggested Remediation</div>
                     <div class="section-content">
                         <pre style="white-space: pre-wrap; font-family: inherit;">{self._escape(impact_info['remediation'])}</pre>
                     </div>
@@ -993,8 +1059,8 @@ class HtmlReportGenerator:
                 </table>
                 
                 <div class="finding-section" style="margin-top: 20px;">
-                    <div class="section-title">Exposed Value</div>
-                    <div class="code-block">{self._escape(finding.matched_value)}</div>
+                    <div class="section-title">Exposed Value (Masked)</div>
+                    <div class="code-block">{self._escape(mask_secret(finding.matched_value))}</div>
                 </div>
                 
                 <div class="finding-section">
@@ -1007,7 +1073,7 @@ class HtmlReportGenerator:
         
         html_content += f"""
         <div class="report-footer">
-            <div class="footer-brand">🦇 NightCrawler v2.5</div>
+            <div class="footer-brand">🦇 NightCrawler v5.0</div>
             <p>Automated Security Scanner by {self._escape(self.config.reporter_name)}</p>
             <p style="margin-top: 10px;">Keep Learning // Keep Hacking</p>
         </div>
@@ -1016,10 +1082,96 @@ class HtmlReportGenerator:
 </html>
 """
         return html_content
-    
+
+    def generate_bugcrowd_json(self, findings: List, scan_result) -> dict:
+        """
+        Generate structured Bugcrowd-compatible vulnerability and recon report as JSON.
+        All secret values and sensitive header tokens are strictly masked.
+        """
+        severity_counts = {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0}
+        vulnerabilities = []
+
+        for f in findings:
+            sev = f.severity() if hasattr(f, 'severity') else "MEDIUM"
+            if sev in severity_counts:
+                severity_counts[sev] += 1
+
+            impact_info = get_impact_info(f.pattern_name)
+            priority = {"CRITICAL": "P1", "HIGH": "P2", "MEDIUM": "P3", "LOW": "P4"}.get(sev, "P3")
+            masked_val = mask_secret(f.matched_value)
+            masked_ctx = f.context.replace(f.matched_value, masked_val) if (f.context and f.matched_value in f.context) else (f.context or "N/A")
+
+            vulnerabilities.append({
+                "vulnerability_title": f"[{priority}] Potential {f.pattern_name} Exposure in Client-Side JavaScript",
+                "affected_asset": f.url,
+                "vulnerability_category": "Server Security Misconfiguration > Sensitive Data Exposure",
+                "severity": f"{priority} - {sev}",
+                "cvss_score": impact_info['cvss'],
+                "description": (
+                    f"During passive bug bounty reconnaissance of authorized asset {scan_result.target}, "
+                    f"a potential secret matching pattern '{f.pattern_name}' was identified within client-side JavaScript. "
+                    "Note: In accordance with responsible disclosure principles, credentials have NOT been validated or tested against external APIs."
+                ),
+                "preconditions": "Unauthenticated HTTPS network access to target asset.",
+                "reproduction_steps": [
+                    f"Fetch the target JavaScript file: curl -s \"{f.url}\"",
+                    f"Inspect line {f.line_number or 'within bundle'}",
+                    f"Observe potential pattern match (masked): {masked_val}"
+                ],
+                "expected_result": "Client-side scripts should not expose API keys, private tokens, or sensitive credentials.",
+                "actual_result": f"Found potential secret matching pattern '{f.pattern_name}'. Masked token: {masked_val}",
+                "security_impact": impact_info['impact'],
+                "evidence_references": {
+                    "source_url": f.url,
+                    "line_number": f.line_number,
+                    "masked_evidence": masked_val,
+                    "context": masked_ctx
+                },
+                "suggested_remediation": impact_info['remediation']
+            })
+
+        endpoints_data = []
+        if hasattr(scan_result, 'discovered_endpoints') and scan_result.discovered_endpoints:
+            for ep in scan_result.discovered_endpoints:
+                endpoints_data.append({
+                    "url_or_path": ep.url_or_path if hasattr(ep, 'url_or_path') else str(ep),
+                    "method": ep.method if hasattr(ep, 'method') else "GET",
+                    "parameters": ep.parameters if hasattr(ep, 'parameters') else [],
+                    "endpoint_type": ep.endpoint_type if hasattr(ep, 'endpoint_type') else "general",
+                    "is_interesting": ep.is_interesting if hasattr(ep, 'is_interesting') else False
+                })
+
+        return {
+            "report_format": "bugcrowd",
+            "version": "5.0",
+            "metadata": {
+                "target": scan_result.target,
+                "program_name": self.config.program_name or "Bug Bounty Program",
+                "reporter_name": self.config.reporter_name,
+                "timestamp": self.timestamp.isoformat(),
+                "scan_duration_seconds": round(scan_result.scan_time, 2)
+            },
+            "summary": {
+                "total_findings": len(findings),
+                "severity_breakdown": severity_counts,
+                "total_urls_scanned": scan_result.total_urls_scanned,
+                "total_js_files": scan_result.total_js_files,
+                "subdomains_found": scan_result.subdomains_found,
+                "total_discovered_endpoints": len(endpoints_data)
+            },
+            "vulnerabilities": vulnerabilities,
+            "discovered_endpoints": endpoints_data
+        }
+
     def generate(self, findings: List, scan_result, output_path: str) -> str:
-        """Generate report based on configured template"""
+        """Generate report based on configured template and output extension."""
+        output_file = Path(output_path)
         
+        if output_file.suffix.lower() == '.json':
+            report_dict = self.generate_bugcrowd_json(findings, scan_result)
+            output_file.write_text(json.dumps(report_dict, indent=2), encoding='utf-8')
+            return output_path
+
         if self.config.template == "hackerone":
             content = self.generate_hackerone_report(findings, scan_result)
         elif self.config.template == "bugcrowd":
@@ -1027,10 +1179,8 @@ class HtmlReportGenerator:
         elif self.config.template == "email":
             content = self.generate_email_report(findings, scan_result)
         else:
-            content = self.generate_hackerone_report(findings, scan_result)
+            content = self.generate_bugcrowd_report(findings, scan_result)
         
         # Save to file
-        output_file = Path(output_path)
         output_file.write_text(content, encoding='utf-8')
-        
         return output_path

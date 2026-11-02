@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-NightCrawler v5.0 - Interactive Mode
-Fully interactive JS secret scanner with all tools
+NightCrawler v5.0 - Interactive Bug Bounty Reconnaissance Interface
+Full interactive configuration menu complying with bug bounty rules.
 by CyberTechAjju | Keep Learning // Keep Hacking
 """
 
@@ -19,28 +19,19 @@ try:
     from rich.panel import Panel
     from rich.text import Text
     from rich.table import Table
-    from rich.prompt import Prompt, Confirm, IntPrompt
+    from rich.prompt import Prompt, Confirm, IntPrompt, FloatPrompt
 except ImportError:
     subprocess.run([sys.executable, "-m", "pip", "install", "rich", "aiohttp", "jsbeautifier", "click", "-q"])
     from rich.console import Console
     from rich.panel import Panel
     from rich.text import Text
     from rich.table import Table
-    from rich.prompt import Prompt, Confirm, IntPrompt
+    from rich.prompt import Prompt, Confirm, IntPrompt, FloatPrompt
+
+from src.core.request_config import load_config, NightCrawlerConfig
+from src.core.header_manager import HeaderManager
 
 console = Console()
-
-REQUIRED_TOOLS = {
-    "subfinder": {"name": "Subfinder", "install": "go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest", "required": True},
-    "httpx": {"name": "Httpx", "install": "go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest", "required": True},
-    "katana": {"name": "Katana", "install": "go install -v github.com/projectdiscovery/katana/cmd/katana@latest", "required": True},
-    "gau": {"name": "GAU", "install": "go install -v github.com/lc/gau/v2/cmd/gau@latest", "required": False},
-    "waybackurls": {"name": "Waybackurls", "install": "go install -v github.com/tomnomnom/waybackurls@latest", "required": False},
-    "subjs": {"name": "SubJS", "install": "go install -v github.com/lc/subjs@latest", "required": False},
-    "jsluice": {"name": "JSLuice", "install": "go install -v github.com/BishopFox/jsluice/cmd/jsluice@latest", "required": False},
-    "hakrawler": {"name": "Hakrawler", "install": "go install -v github.com/hakluke/hakrawler@latest", "required": False},
-    "getjs": {"name": "GetJS", "install": "go install -v github.com/003random/getJS@latest", "required": False},
-}
 
 BANNER = """
 [bold green]
@@ -54,23 +45,6 @@ BANNER = """
 """
 
 
-def find_tool(tool_id):
-    """Find tool in PATH or common locations"""
-    path = shutil.which(tool_id)
-    if path:
-        return path
-    
-    go_bin = os.path.expanduser(f"~/go/bin/{tool_id}")
-    if os.path.exists(go_bin):
-        return go_bin
-    
-    local_bin = f"/usr/local/bin/{tool_id}"
-    if os.path.exists(local_bin):
-        return local_bin
-    
-    return None
-
-
 def clear_screen():
     os.system('clear' if os.name != 'nt' else 'cls')
 
@@ -80,209 +54,234 @@ def print_banner():
     console.print(BANNER)
     
     info = Text()
-    info.append("v5.0", style="bold green")
+    info.append("v5.0 Bug Bounty Edition", style="bold green")
     info.append(" │ ", style="dim")
-    info.append("All Tools", style="yellow")
+    info.append("Max 5 RPS", style="bold cyan")
     info.append(" │ ", style="dim")
-    info.append("75+ KeyHacks", style="bold red")
+    info.append("Scope Enforced", style="bold yellow")
     info.append(" │ ", style="dim")
-    info.append("No Timeouts", style="bold magenta")
+    info.append("Verified TLS", style="bold green")
+    info.append(" │ ", style="dim")
+    info.append("Bugcrowd Reports", style="bold magenta")
     console.print(Panel(info, border_style="green"))
-    console.print("[dim]⚠️  Ethical Use Only • Keep Learning // Keep Hacking[/dim]\n")
+    console.print("[dim]⚠️  Ethical Bug Bounty Reconnaissance Only • Keep Learning // Keep Hacking[/dim]\n")
 
 
-def check_dependencies():
-    """Check all tools and offer to install missing ones"""
-    console.print("\n[bold cyan]🔍 Checking Dependencies...[/bold cyan]\n")
-    
-    table = Table(title="Tool Status", show_header=True, header_style="bold cyan")
-    table.add_column("Tool", style="white", width=15)
-    table.add_column("Status", justify="center", width=12)
-    table.add_column("Path", style="dim", width=40)
-    
-    missing_required = []
-    tool_paths = {}
-    
-    for tool_id, tool_info in REQUIRED_TOOLS.items():
-        path = find_tool(tool_id)
-        tool_paths[tool_id] = path
-        
-        if path:
-            status = "[green]✓ Found[/green]"
-            display_path = path[:38] + ".." if len(path) > 40 else path
-        else:
-            if tool_info.get("required"):
-                status = "[red]✗ Missing[/red]"
-                missing_required.append(tool_id)
-            else:
-                status = "[yellow]○ Optional[/yellow]"
-            display_path = "-"
-        
-        table.add_row(tool_info["name"], status, display_path)
-    
+def display_menu():
+    """Display the 12-item interactive configuration menu"""
+    table = Table(title="[bold cyan]🎯 NightCrawler Configuration & Control Menu[/]", show_header=True, header_style="bold cyan", border_style="cyan")
+    table.add_column("Option", style="bold green", width=8, justify="center")
+    table.add_column("Configuration Task", style="white", width=42)
+    table.add_column("Status / Current Value", style="yellow", width=28)
+
+    return table
+
+
+def render_review_panel(cfg: NightCrawlerConfig, target: str):
+    """Render full configuration review with sensitive values strictly masked"""
+    hm = cfg.get_header_manager()
+    hdr_val = hm.get_masked_value() if hm.is_active() else "(disabled)"
+
+    table = Table(title="[bold cyan]📋 Configuration Review (Values Safely Masked)[/]", border_style="green", show_header=True)
+    table.add_column("Parameter", style="cyan", width=30)
+    table.add_column("Configured Setting", style="white", width=45)
+
+    table.add_row("1. Target Domain", target or "(Not configured)")
+    table.add_row("2. Allowed Scope", ", ".join(cfg.allowed_domains) or "None")
+    table.add_row("3. Excluded Domains", ", ".join(cfg.excluded_domains) or "None")
+    table.add_row("4. Researcher Header", f"{cfg.header_name}: {hdr_val}" if cfg.custom_header_enabled else "Disabled")
+    table.add_row("5. Max Requests Per Second", f"{cfg.max_requests_per_second} RPS")
+    table.add_row("6. Concurrency", str(cfg.concurrency))
+    table.add_row("7. JavaScript Extraction", "Enabled" if cfg.javascript_extraction else "Disabled")
+    table.add_row("8. Endpoint Discovery", "Enabled" if cfg.endpoint_discovery else "Disabled")
+    table.add_row("9. Secret Detection", "Enabled" if cfg.secret_detection else "Disabled")
+    table.add_row("10. Report Template & Format", f"{cfg.default_template.upper()} ({cfg.default_format.upper()})")
+    table.add_row("TLS Certificate Verification", "Enabled (Strict)" if cfg.verify_tls else "Disabled")
+    table.add_row("KeyHacks Validation", "Disabled (Safe by default)" if not cfg.validate_keys else "Enabled")
+
+    console.print()
     console.print(table)
-    
-    for dep in ["aiohttp", "rich", "jsbeautifier", "click"]:
-        try:
-            __import__(dep.replace("-", "_"))
-        except ImportError:
-            subprocess.run([sys.executable, "-m", "pip", "install", dep, "-q"])
-    
-    if missing_required:
-        console.print(f"\n[red]⚠️  Missing required tools: {', '.join(missing_required)}[/red]")
-        if Confirm.ask("[yellow]Install missing tools?[/yellow]", default=True):
-            for tool_id in missing_required:
-                tool = REQUIRED_TOOLS.get(tool_id, {})
-                console.print(f"[cyan]Installing {tool['name']}...[/cyan]")
-                subprocess.run(tool["install"], shell=True)
-    
-    console.print("\n[green]✓ Dependency check complete![/green]")
-    time.sleep(1)
-    return True
+    console.print()
 
 
-def get_target():
+def run_scan_subprocess(target: str, cfg: NightCrawlerConfig):
+    """Execute main.py with the configured parameters"""
     console.print("\n[bold cyan]┌─────────────────────────────────────────────────────────────┐[/bold cyan]")
-    console.print("[bold cyan]│               🎯  TARGET CONFIGURATION                      │[/bold cyan]")
+    console.print("[bold cyan]│               🚀  STARTING BUG BOUNTY SCAN                  │[/bold cyan]")
     console.print("[bold cyan]└─────────────────────────────────────────────────────────────┘[/bold cyan]\n")
-    
-    target = Prompt.ask("[bold white]Enter target domain[/bold white]", default="example.com")
-    
-    if not target or target == "example.com":
-        console.print("[yellow]⚠️  Please enter a valid target domain![/yellow]")
-        return get_target()
-    
-    console.print(f"\n[green]✓ Target: {target}[/green]")
-    return target
 
+    cmd = [
+        sys.executable, "main.py",
+        "-t", target,
+        "--mode", "deep",
+        "--no-prompt",
+        "--concurrency", str(cfg.concurrency),
+        "--max-rps", str(cfg.max_requests_per_second),
+        "--timeout", str(cfg.timeout),
+        "--depth", str(cfg.depth),
+        "--template", cfg.default_template,
+        "-o", f"report_{target.replace('.', '_')}.{cfg.default_format}"
+    ]
 
-def get_scan_mode():
-    console.print("\n[bold cyan]┌─────────────────────────────────────────────────────────────┐[/bold cyan]")
-    console.print("[bold cyan]│               ⚙️  SCAN MODE                                  │[/bold cyan]")
-    console.print("[bold cyan]├─────────────────────────────────────────────────────────────┤[/bold cyan]")
-    console.print("[bold cyan]│  [/bold cyan][bold green][1][/bold green] Main Domain Only[bold cyan]                                  │[/bold cyan]")
-    console.print("[bold cyan]│      [/bold cyan][dim]→ Fast scan on main domain[/dim][bold cyan]                        │[/bold cyan]")
-    console.print("[bold cyan]│  [/bold cyan][bold yellow][2][/bold yellow] Include Subdomains[bold cyan]                                │[/bold cyan]")
-    console.print("[bold cyan]│      [/bold cyan][dim]→ Subfinder + GAU + Katana[/dim][bold cyan]                         │[/bold cyan]")
-    console.print("[bold cyan]│  [/bold cyan][bold red][3][/bold red] Deep Scan (ALL TOOLS)[bold cyan]                              │[/bold cyan]")
-    console.print("[bold cyan]│      [/bold cyan][dim]→ All 9 tools, no timeout, full recon[/dim][bold cyan]              │[/bold cyan]")
-    console.print("[bold cyan]└─────────────────────────────────────────────────────────────┘[/bold cyan]\n")
-    
-    choice = IntPrompt.ask("[bold white]Select mode[/bold white]", choices=["1", "2", "3"], default=1)
-    
-    modes = {1: "main", 2: "subdomains", 3: "deep"}
-    mode_names = {1: "Main Domain Only", 2: "Subdomains", 3: "Deep Scan (All Tools)"}
-    
-    console.print(f"\n[green]✓ Mode: {mode_names[choice]}[/green]")
-    return modes[choice]
+    for d in cfg.allowed_domains:
+        cmd.extend(["--allowed-domain", d])
 
+    for ed in cfg.excluded_domains:
+        cmd.extend(["--excluded-domain", ed])
 
-def get_validate_keys():
-    console.print("\n[bold cyan]┌─────────────────────────────────────────────────────────────┐[/bold cyan]")
-    console.print("[bold cyan]│               🔑  KEY VALIDATION                            │[/bold cyan]")
-    console.print("[bold cyan]│  Auto-validate secrets using 75+ API checks                │[/bold cyan]")
-    console.print("[bold cyan]│  [/bold cyan][yellow]⚠️  For authorized testing only![/yellow][bold cyan]                         │[/bold cyan]")
-    console.print("[bold cyan]└─────────────────────────────────────────────────────────────┘[/bold cyan]\n")
-    
-    validate = Confirm.ask("[bold white]Validate discovered keys?[/bold white]", default=True)
-    
-    if validate:
-        console.print("\n[green]✓ Key validation enabled[/green]")
+    if cfg.custom_header_enabled and cfg.header_value:
+        cmd.extend(["--header-name", cfg.header_name, "--header-value", cfg.header_value])
     else:
-        console.print("\n[yellow]○ Key validation disabled[/yellow]")
-    
-    return validate
+        cmd.append("--disable-header")
 
+    if cfg.verify_tls:
+        cmd.append("--verify-tls")
+    else:
+        cmd.append("--no-verify-tls")
 
-def get_report_config():
-    console.print("\n[bold cyan]┌─────────────────────────────────────────────────────────────┐[/bold cyan]")
-    console.print("[bold cyan]│               📄  REPORT CONFIGURATION                      │[/bold cyan]")
-    console.print("[bold cyan]└─────────────────────────────────────────────────────────────┘[/bold cyan]\n")
-    
-    generate = Confirm.ask("[bold white]Generate HTML report?[/bold white]", default=True)
-    
-    if not generate:
-        return None
-    
-    console.print("\n[bold cyan]Report Format:[/bold cyan]")
-    console.print("  [green][1][/green] HackerOne")
-    console.print("  [yellow][2][/yellow] BugCrowd")
-    console.print("  [blue][3][/blue] Email\n")
-    
-    format_choice = IntPrompt.ask("[bold white]Select format[/bold white]", choices=["1", "2", "3"], default=1)
-    formats = {1: "hackerone", 2: "bugcrowd", 3: "email"}
-    
-    reporter_name = Prompt.ask("[bold white]Your name[/bold white]", default="Hunter")
-    program_name = Prompt.ask("[bold white]Program name (optional)[/bold white]", default="")
-    
-    console.print(f"\n[green]✓ Report: {formats[format_choice].upper()}[/green]")
-    
-    return {"generate": True, "format": formats[format_choice], "reporter": reporter_name, "program": program_name}
+    if cfg.strict_scope:
+        cmd.append("--strict-scope")
 
-
-def run_scan(target, mode, validate_keys, report_config):
-    console.print("\n[bold cyan]┌─────────────────────────────────────────────────────────────┐[/bold cyan]")
-    console.print("[bold cyan]│               🚀  STARTING SCAN                             │[/bold cyan]")
-    console.print("[bold cyan]└─────────────────────────────────────────────────────────────┘[/bold cyan]\n")
-    
-    cmd = [sys.executable, "main.py", "-t", target, "--mode", mode, "--no-prompt"]
-    
-    if validate_keys:
+    if cfg.validate_keys:
         cmd.append("--validate-keys")
-    
-    if report_config:
-        output_file = f"report_{target.replace('.', '_')}_{int(time.time())}.html"
-        cmd.extend(["-o", output_file, "--template", report_config["format"], "--reporter", report_config["reporter"]])
-        if report_config.get("program"):
-            cmd.extend(["--program", report_config["program"]])
-    
-    console.print(f"[dim]Command: {' '.join(cmd)}[/dim]\n")
-    
+
+    # Safe display command with masked header
+    display_cmd = list(cmd)
+    if "--header-value" in display_cmd:
+        idx = display_cmd.index("--header-value")
+        display_cmd[idx + 1] = cfg.get_header_manager().get_masked_value()
+
+    console.print(f"[dim]Command: {' '.join(display_cmd)}[/dim]\n")
+
     try:
         result = subprocess.run(cmd, cwd=Path(__file__).parent)
-        
         if result.returncode == 0:
-            console.print("\n[bold green]✓ Scan completed successfully![/bold green]")
-            if report_config:
-                console.print(f"[green]📄 Report saved: {output_file}[/green]")
+            console.print("\n[bold green]✓ Reconnaissance completed successfully![/bold green]")
         else:
-            console.print("\n[yellow]⚠️  Scan completed with warnings[/yellow]")
-            
+            console.print("\n[yellow]⚠️  Scan finished with exit code: " + str(result.returncode) + "[/yellow]")
     except KeyboardInterrupt:
-        console.print("\n[yellow]⚠️  Scan interrupted[/yellow]")
+        console.print("\n[yellow]⚠️  Scan interrupted by user.[/yellow]")
     except Exception as e:
-        console.print(f"\n[red]✗ Error: {e}[/red]")
+        console.print(f"\n[red]✗ Error during execution: {e}[/red]")
 
 
 def main():
     try:
         print_banner()
-        
-        if not check_dependencies():
-            return
-        
-        target = get_target()
-        mode = get_scan_mode()
-        validate_keys = get_validate_keys()
-        report_config = get_report_config()
-        
-        console.print("\n[bold cyan]┌─────────────────────────────────────────────────────────────┐[/bold cyan]")
-        console.print("[bold cyan]│               ✅  SCAN SUMMARY                              │[/bold cyan]")
-        console.print("[bold cyan]├─────────────────────────────────────────────────────────────┤[/bold cyan]")
-        console.print(f"[bold cyan]│  Target: [/bold cyan][white]{target:<48}[/white][bold cyan]│[/bold cyan]")
-        console.print(f"[bold cyan]│  Mode: [/bold cyan][white]{mode:<50}[/white][bold cyan]│[/bold cyan]")
-        console.print(f"[bold cyan]│  Validate Keys: [/bold cyan][white]{'Yes' if validate_keys else 'No':<41}[/white][bold cyan]│[/bold cyan]")
-        console.print(f"[bold cyan]│  Report: [/bold cyan][white]{report_config['format'].upper() if report_config else 'No':<48}[/white][bold cyan]│[/bold cyan]")
-        console.print("[bold cyan]└─────────────────────────────────────────────────────────────┘[/bold cyan]\n")
-        
-        if not Confirm.ask("[bold white]Start scan?[/bold white]", default=True):
-            console.print("[yellow]Scan cancelled.[/yellow]")
-            return
-        
-        run_scan(target, mode, validate_keys, report_config)
-        
-        console.print("\n[bold green]🦇 NightCrawler v5.0 scan complete![/bold green]\n")
-        
+        cfg = load_config()
+        target = "uxcam.com"
+
+        while True:
+            hm = cfg.get_header_manager()
+            hdr_display = hm.get_masked_value() if hm.is_active() else "Disabled"
+
+            table = display_menu()
+            table.add_row("[1]", "Configure target", target)
+            table.add_row("[2]", "Configure allowed scope", f"{len(cfg.allowed_domains)} domains: {', '.join(cfg.allowed_domains)[:20]}")
+            table.add_row("[3]", "Configure excluded domains", f"{len(cfg.excluded_domains)} domains: {', '.join(cfg.excluded_domains)[:20]}")
+            table.add_row("[4]", "Configure researcher header", f"{cfg.header_name}: {hdr_display}")
+            table.add_row("[5]", "Configure max requests/sec", f"{cfg.max_requests_per_second} RPS")
+            table.add_row("[6]", "Configure concurrency", str(cfg.concurrency))
+            table.add_row("[7]", "Toggle JavaScript extraction", "Enabled" if cfg.javascript_extraction else "Disabled")
+            table.add_row("[8]", "Toggle endpoint discovery", "Enabled" if cfg.endpoint_discovery else "Disabled")
+            table.add_row("[9]", "Toggle secret detection", "Enabled" if cfg.secret_detection else "Disabled")
+            table.add_row("[10]", "Configure report format", f"{cfg.default_template.upper()} ({cfg.default_format.upper()})")
+            table.add_row("[11]", "Review configuration summary", "[cyan]View Masked Summary[/]")
+            table.add_row("[12]", "Start reconnaissance", "[bold green]🚀 Run Recon Scan[/]")
+            table.add_row("[0]", "Exit NightCrawler", "[dim]Quit[/]")
+
+            console.print(table)
+            console.print()
+
+            choice = Prompt.ask("[bold white]Select an option [0-12][/bold white]", default="12")
+
+            if choice == "1":
+                new_target = Prompt.ask("[bold cyan]Enter target domain[/]", default=target)
+                if new_target:
+                    target = new_target.strip().lower()
+                    console.print(f"[green]✓ Target set to: {target}[/]\n")
+
+            elif choice == "2":
+                console.print(f"[dim]Current allowed domains: {', '.join(cfg.allowed_domains)}[/dim]")
+                domains_in = Prompt.ask("[bold cyan]Enter allowed domains (comma-separated)[/]", default=", ".join(cfg.allowed_domains))
+                cfg.allowed_domains = [d.strip().lower() for d in domains_in.split(",") if d.strip()]
+                console.print(f"[green]✓ Allowed scope updated: {', '.join(cfg.allowed_domains)}[/]\n")
+
+            elif choice == "3":
+                console.print(f"[dim]Current excluded domains: {', '.join(cfg.excluded_domains)}[/dim]")
+                domains_in = Prompt.ask("[bold cyan]Enter excluded domains (comma-separated)[/]", default=", ".join(cfg.excluded_domains))
+                cfg.excluded_domains = [d.strip().lower() for d in domains_in.split(",") if d.strip()]
+                console.print(f"[green]✓ Excluded domains updated: {', '.join(cfg.excluded_domains)}[/]\n")
+
+            elif choice == "4":
+                cfg.custom_header_enabled = Confirm.ask("[bold cyan]Enable researcher identification header?[/]", default=cfg.custom_header_enabled)
+                if cfg.custom_header_enabled:
+                    cfg.header_name = Prompt.ask("Header Name", default=cfg.header_name)
+                    new_val = Prompt.ask("Header Value (e.g. researcher email)", default=cfg.header_value or "")
+                    if new_val:
+                        cfg.header_value = new_val
+                    console.print(f"[green]✓ Header configured: {cfg.header_name} (masked: {cfg.get_header_manager().get_masked_value()})[/]\n")
+                if Confirm.ask("Save this header configuration to config.yaml?", default=False):
+                    cfg.save_to_file()
+                    console.print("[green]✓ Configuration saved to config.yaml[/]\n")
+
+            elif choice == "5":
+                cfg.max_requests_per_second = FloatPrompt.ask("[bold cyan]Maximum requests per second[/]", default=cfg.max_requests_per_second)
+                console.print(f"[green]✓ Rate limit set to {cfg.max_requests_per_second} RPS[/]\n")
+
+            elif choice == "6":
+                cfg.concurrency = IntPrompt.ask("[bold cyan]Concurrency workers (1-5 recommended for 5 RPS)[/]", default=cfg.concurrency)
+                console.print(f"[green]✓ Concurrency set to {cfg.concurrency}[/]\n")
+
+            elif choice == "7":
+                cfg.javascript_extraction = not cfg.javascript_extraction
+                console.print(f"[green]✓ JavaScript extraction: {'Enabled' if cfg.javascript_extraction else 'Disabled'}[/]\n")
+
+            elif choice == "8":
+                cfg.endpoint_discovery = not cfg.endpoint_discovery
+                console.print(f"[green]✓ Endpoint discovery: {'Enabled' if cfg.endpoint_discovery else 'Disabled'}[/]\n")
+
+            elif choice == "9":
+                cfg.secret_detection = not cfg.secret_detection
+                console.print(f"[green]✓ Secret detection: {'Enabled' if cfg.secret_detection else 'Disabled'}[/]\n")
+
+            elif choice == "10":
+                console.print("\nTemplate choices: [1] Bugcrowd  [2] HackerOne  [3] Email")
+                t_choice = Prompt.ask("Select template", choices=["1", "2", "3"], default="1")
+                cfg.default_template = {"1": "bugcrowd", "2": "hackerone", "3": "email"}[t_choice]
+
+                console.print("\nFormat choices: [1] HTML  [2] JSON")
+                f_choice = Prompt.ask("Select format", choices=["1", "2"], default="1")
+                cfg.default_format = {"1": "html", "2": "json"}[f_choice]
+                console.print(f"[green]✓ Report set to: {cfg.default_template.upper()} ({cfg.default_format.upper()})[/]\n")
+
+            elif choice == "11":
+                render_review_panel(cfg, target)
+                Prompt.ask("Press Enter to return to menu", default="")
+
+            elif choice == "12":
+                render_review_panel(cfg, target)
+                # Scope check on target
+                scope_mgr = cfg.get_scope_manager()
+                host = scope_mgr.extract_hostname(target)
+                if host and not scope_mgr.is_host_allowed(host):
+                    console.print(f"[bold red]❌ ERROR: Target '{target}' is not in allowed scope or is excluded![/]")
+                    console.print("[yellow]Please update the target or configure allowed scope first.[/]\n")
+                    Prompt.ask("Press Enter to continue", default="")
+                    continue
+
+                if Confirm.ask("[bold green]Confirm: Proceed with live reconnaissance scan?[/]", default=True):
+                    run_scan_subprocess(target, cfg)
+                    Prompt.ask("\nPress Enter to return to menu", default="")
+                else:
+                    console.print("[yellow]Scan cancelled by user.[/yellow]\n")
+
+            elif choice == "0":
+                console.print("[yellow]👋 Goodbye! Keep Learning // Keep Hacking[/yellow]")
+                break
+
+            time.sleep(0.5)
+
     except KeyboardInterrupt:
         console.print("\n[yellow]👋 Goodbye![/yellow]")
 

@@ -1,24 +1,36 @@
-# NightCrawler Config
-# Customize tool paths here if they're not in your PATH
+# NightCrawler v5.0 - Bug Bounty Reconnaissance Configuration
+# Scope-aware, rate-limited recon for authorized bug bounty targets
 
-tools:
-  # Leave empty to auto-detect from PATH
-  subfinder: ""
-  httpx: ""
-  katana: ""
-  gau: ""
-  waybackurls: ""
-  subjs: ""
-  jsluice: ""
-  hakrawler: ""
+scope:
+  enabled: true
+  allowed_domains:
+    - uxcam.com
+    - uxc.am
 
-# Scan settings
+  excluded_domains:
+    - tara.uxcam.com
+    - connect.uxcam.com
+
+researcher:
+  custom_header_enabled: true
+  header_name: X-User-Id
+  header_value_env: NIGHTCRAWLER_RESEARCHER_ID
+
 scan:
-  concurrency: 50
+  concurrency: 1
   timeout: 30
-  depth: 2
+  depth: 1
+  max_requests_per_second: 5
+  strict_scope: true
+  verify_tls: true
 
-# Report settings
+features:
+  javascript_extraction: true
+  endpoint_discovery: true
+  secret_detection: true
+  validate_keys: false
+  external_secret_validation: false
+
 report:
-  default_template: hackerone
-  default_reporter: YourName
+  default_template: bugcrowd
+  default_format: html
