@@ -6,6 +6,7 @@ Strict, configurable target scope validation with subdomain boundary checks.
 from typing import List, Set, Optional, Iterable
 from urllib.parse import urlparse
 import re
+import ipaddress
 
 
 class ScopeManager:
@@ -43,16 +44,13 @@ class ScopeManager:
         if not domain:
             return ""
         domain = domain.strip().lower()
-        # Strip scheme if accidentally passed
         if "://" in domain:
             parsed = urlparse(domain)
             domain = parsed.hostname or ""
-        # Strip leading wildcard *.
         if domain.startswith("*."):
             domain = domain[2:]
         elif domain.startswith("."):
             domain = domain[1:]
-        # Strip port if present
         if ":" in domain:
             domain = domain.split(":")[0]
         return domain.rstrip(".")
@@ -67,11 +65,14 @@ class ScopeManager:
             return None
         target_or_url = target_or_url.strip()
 
-        # Check if it has a scheme, otherwise prefix https:// for urlparse
-        if "://" not in target_or_url:
-            url_to_parse = f"https://{target_or_url}"
-        else:
+        # Reject schemes that are not http/https if scheme is present
+        if "://" in target_or_url:
+            scheme = target_or_url.split("://")[0].lower()
+            if scheme not in ("http", "https"):
+                return None
             url_to_parse = target_or_url
+        else:
+            url_to_parse = f"https://{target_or_url}"
 
         try:
             parsed = urlparse(url_to_parse)
@@ -117,7 +118,7 @@ class ScopeManager:
 
         host = host.lower().rstrip(".")
 
-        # Check exclusions first (explicit exclusions override allowed)
+        # Explicit exclusions override allowed domains (including all subdomains)
         for excluded in self.excluded_domains:
             if self._matches_domain_pattern(host, excluded):
                 return False
@@ -126,7 +127,7 @@ class ScopeManager:
         if not self.allowed_domains:
             return False
 
-        # Check if matches any allowed domain
+        # Check if matches any allowed domain (exact or subdomain)
         for allowed in self.allowed_domains:
             if self._matches_domain_pattern(host, allowed):
                 return True
@@ -134,23 +135,34 @@ class ScopeManager:
         return False
 
     def is_url_in_scope(self, url: str) -> bool:
-        """Check if a full URL's hostname is within authorized scope."""
+        """Check if a full URL's hostname and scheme are within authorized scope."""
         if not self.enabled:
             return True
 
         if not url:
             return False
 
-        # Scheme must be http or https
-        parsed = urlparse(url.strip())
-        if parsed.scheme and parsed.scheme.lower() not in ("http", "https"):
+        url_str = url.strip()
+
+        # Reject dangerous/invalid pseudo-schemes
+        lower_url = url_str.lower()
+        if any(lower_url.startswith(bad) for bad in ("javascript:", "data:", "file:", "ftp:", "about:", "blob:", "ws:", "wss:")):
             return False
 
-        host = self.extract_hostname(url)
+        # Scheme must be http or https if specified
+        if "://" in url_str:
+            scheme = url_str.split("://")[0].lower()
+            if scheme not in ("http", "https"):
+                return False
+
+        host = self.extract_hostname(url_str)
+        if not host:
+            return False
+
         return self.is_host_allowed(host)
 
     def filter_subdomains(self, subdomains: Iterable[str]) -> List[str]:
-        """Filter list of subdomains/hostnames to only those in scope."""
+        """Filter list of subdomains/hostnames to only those strictly in scope."""
         valid = []
         for sub in subdomains:
             host = self.extract_hostname(sub)

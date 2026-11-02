@@ -167,18 +167,24 @@ class KatanaIntegration:
         tool_path: Optional[str] = None,
         scope_manager: Optional[ScopeManager] = None,
         header_manager: Optional[HeaderManager] = None,
-        max_rps: float = 5.0
+        max_rps: float = 5.0,
+        strict_mode: bool = True
     ):
         self.tool_path = tool_path or find_tool('katana')
         self.scope_manager = scope_manager
         self.header_manager = header_manager
         self.max_rps = max_rps
+        self.strict_mode = strict_mode
     
     def is_available(self) -> bool:
         return self.tool_path is not None and Path(self.tool_path).exists()
     
     def crawl(self, targets: List[str], depth: int = 2, js_only: bool = True) -> List[str]:
-        """Crawl targets with rate limiting, scope filtering, and researcher headers"""
+        """Crawl targets with rate limiting, scope filtering, and compliance checking"""
+        if self.strict_mode:
+            console.print("[yellow][i] Katana disabled in strict compliance mode (external subprocess cannot guarantee shared 5 RPS rate limit). Using internal rate-limited crawler instead.[/]")
+            return []
+
         if not self.is_available():
             console.print("[yellow][!] Katana not found. Skipping deep crawl.[/]")
             return []

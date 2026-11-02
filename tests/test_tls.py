@@ -60,3 +60,19 @@ async def test_ssl_certificate_error_raises_without_fallback():
     call_kwargs = mock_session.get.call_args.kwargs
     assert call_kwargs.get("ssl") is client.ssl_context
     assert call_kwargs.get("ssl") is not False
+
+
+def test_insecure_tls_rejected_in_strict_compliance_mode():
+    """Verify that disabling TLS verification in strict compliance mode is rejected."""
+    scope = ScopeManager(allowed_domains=["uxcam.com"], enabled=True)
+    limiter = GlobalRateLimiter()
+    hm = HeaderManager()
+
+    # HttpClient must reject verify_tls=False when strict_mode=True
+    with pytest.raises(ValueError, match="Insecure TLS configuration is prohibited in strict compliance mode"):
+        NightCrawlerHttpClient(scope, limiter, hm, verify_tls=False, strict_mode=True)
+
+    # Scanner must also reject verify_tls=False when strict_scope=True
+    with pytest.raises(ValueError, match="Insecure TLS configuration is prohibited in strict compliance mode"):
+        NightCrawlerScanner(concurrency=1, verify_tls=False, strict_scope=True)
+

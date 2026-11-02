@@ -136,13 +136,18 @@ class NightCrawlerScanner:
         self.secret_detection = secret_detection
         self.validate_keys = validate_keys
 
+        # In strict compliance mode, reject insecure TLS configuration
+        if self.strict_scope and not self.verify_tls:
+            raise ValueError("Insecure TLS configuration is prohibited in strict compliance mode.")
+
         # Centralized HTTP client
         self.http_client = NightCrawlerHttpClient(
             scope_manager=self.scope_manager,
             rate_limiter=self.rate_limiter,
             header_manager=self.header_manager,
             timeout_seconds=timeout,
-            verify_tls=verify_tls
+            verify_tls=verify_tls,
+            strict_mode=strict_scope
         )
 
         # Endpoint extractor
@@ -166,7 +171,8 @@ class NightCrawlerScanner:
         self.katana = KatanaIntegration(
             scope_manager=self.scope_manager,
             header_manager=self.header_manager,
-            max_rps=self.max_requests_per_second
+            max_rps=self.max_requests_per_second,
+            strict_mode=self.strict_scope
         )
         self.gau = GauIntegration(scope_manager=self.scope_manager)
         self.waybackurls = WaybackurlsIntegration(scope_manager=self.scope_manager)

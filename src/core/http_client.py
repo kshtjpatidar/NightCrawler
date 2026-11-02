@@ -27,9 +27,10 @@ class ScopeViolationError(Exception):
 class NightCrawlerHttpClient:
     """
     Centralized asynchronous HTTP client that guarantees:
-    1. Scope enforcement on all URLs and intermediate redirect hops.
-    2. Global rate limiting across all requests, redirects, and retries.
-    3. TLS certificate verification with no insecure fallback.
+    1. Scope enforcement before every outbound request and redirect hop.
+    2. Global rate limiting where EVERY actual HTTP attempt (initial, retry, redirect)
+       strictly consumes a rate-limit token from a shared limiter.
+    3. TLS certificate verification with strict mode rejection of insecure settings.
     4. Safe attachment of researcher identification headers exclusively to in-scope targets.
     """
 
@@ -40,6 +41,7 @@ class NightCrawlerHttpClient:
         header_manager: HeaderManager,
         timeout_seconds: int = 30,
         verify_tls: bool = True,
+        strict_mode: bool = True,
         max_redirects: int = 5,
         max_retries: int = 2
     ):
@@ -48,14 +50,17 @@ class NightCrawlerHttpClient:
         self.header_manager = header_manager
         self.timeout = aiohttp.ClientTimeout(total=timeout_seconds)
         self.verify_tls = verify_tls
+        self.strict_mode = strict_mode
         self.max_redirects = max_redirects
         self.max_retries = max_retries
+
+        if self.strict_mode and not self.verify_tls:
+            raise ValueError("Insecure TLS configuration is prohibited in strict compliance mode.")
 
         # TLS SSLContext - verified by default
         if self.verify_tls:
             self.ssl_context = ssl.create_default_context()
         else:
-            # If explicitly disabled by user configuration
             self.ssl_context = False
 
     async def get(
@@ -66,6 +71,7 @@ class NightCrawlerHttpClient:
     ) -> Tuple[Optional[int], Optional[str], Optional[str]]:
         """
         Execute an HTTP GET request with hop-by-hop redirect verification.
+        Every actual attempt (initial, retry, redirect) consumes a rate limit token.
         Returns: (status_code, content_text, final_url)
         """
         current_url = url.strip()
@@ -78,19 +84,24 @@ class NightCrawlerHttpClient:
         redirect_count = 0
 
         while redirect_count <= self.max_redirects:
-            # Step 2: Rate limit acquisition (counts each request and each redirect hop)
-            await self.rate_limiter.acquire()
-
-            # Step 3: Header construction (only injects researcher header if current_url is in-scope)
+            # Build headers (researcher header only attached if current_url is in-scope)
             headers = self.header_manager.get_headers_for_url(
                 current_url,
                 scope_manager=self.scope_manager,
                 base_headers=extra_headers
             )
 
-            # Step 4: Perform request with allow_redirects=False for hop-by-hop scope inspection
+            # Retry loop: every attempt consumes a rate-limit token
             retry_count = 0
             while retry_count <= self.max_retries:
+                # Scope check before each request attempt
+                if not self.scope_manager.is_url_in_scope(current_url):
+                    logger.warning(f"[Scope] URL {current_url} is out of scope. Aborting attempt.")
+                    return None, None, current_url
+
+                # Every actual HTTP network attempt consumes a token from the shared limiter
+                await self.rate_limiter.acquire()
+
                 try:
                     async with session.get(
                         current_url,
@@ -106,7 +117,7 @@ class NightCrawlerHttpClient:
 
                             next_url = urljoin(current_url, location)
 
-                            # Validate redirect target scope!
+                            # Validate redirect target scope immediately
                             if not self.scope_manager.is_url_in_scope(next_url):
                                 logger.warning(
                                     f"[Scope] Redirect from {current_url} to out-of-scope target "
@@ -114,11 +125,18 @@ class NightCrawlerHttpClient:
                                 )
                                 return response.status, None, current_url
 
+                            # Proceed to next hop
                             current_url = next_url
                             redirect_count += 1
-                            break  # Proceed to next redirect hop
+                            break  # Breaks inner retry loop to process next redirect hop
 
-                        # 200 OK or other response
+                        # Retry on rate limited (429) or transient server errors (502, 503, 504)
+                        if response.status in (429, 502, 503, 504) and retry_count < self.max_retries:
+                            retry_count += 1
+                            await asyncio.sleep(0.5 * retry_count)
+                            continue
+
+                        # 200 OK or other final response
                         text_content = None
                         if response.status == 200:
                             content_type = response.headers.get("content-type", "")
@@ -135,10 +153,9 @@ class NightCrawlerHttpClient:
                 except (aiohttp.ClientError, asyncio.TimeoutError) as net_err:
                     retry_count += 1
                     if retry_count > self.max_retries:
-                        logger.debug(f"[HTTP] Failed after retries: {current_url} ({net_err})")
+                        logger.debug(f"[HTTP] Failed after {self.max_retries} retries: {current_url} ({net_err})")
                         return None, None, current_url
-                    # Rate limit retry attempt as well
-                    await self.rate_limiter.acquire()
+                    await asyncio.sleep(0.5 * retry_count)
 
-        logger.warning(f"[HTTP] Maximum redirects exceeded for {url}")
+        logger.warning(f"[HTTP] Maximum redirects ({self.max_redirects}) exceeded for {url}")
         return None, None, current_url

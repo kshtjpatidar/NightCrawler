@@ -83,3 +83,38 @@ def test_format_cli_header_flag():
 
     hm_off = HeaderManager(enabled=False)
     assert hm_off.format_cli_header_flag() is None
+
+
+def test_subprocess_env_passing_not_cli_args():
+    """
+    CRITICAL: Verify that when launching a scan subprocess from run.py,
+    the sensitive header value is passed via process environment (env),
+    NEVER in sys.argv / command-line arguments (preventing ps aux exposure).
+    """
+    from unittest.mock import patch, MagicMock
+    from run import run_scan_subprocess
+    from src.core.request_config import NightCrawlerConfig
+
+    cfg = NightCrawlerConfig(
+        custom_header_enabled=True,
+        header_name="X-User-Id",
+        header_value="secret_researcher@example.com"
+    )
+
+    with patch("subprocess.run") as mock_subproc:
+        mock_subproc.return_value = MagicMock(returncode=0)
+        run_scan_subprocess("uxcam.com", cfg)
+
+        assert mock_subproc.call_count == 1
+        called_args, called_kwargs = mock_subproc.call_args
+        cmd_called = called_args[0]
+        env_called = called_kwargs.get("env", {})
+
+        # The raw secret MUST NOT be in command line arguments!
+        assert "--header-value" not in cmd_called
+        assert "secret_researcher@example.com" not in " ".join(cmd_called)
+
+        # The raw secret MUST be present in the subprocess environment dictionary
+        assert env_called.get("NIGHTCRAWLER_RESEARCHER_ID") == "secret_researcher@example.com"
+        assert env_called.get("NIGHTCRAWLER_HEADER_VALUE") == "secret_researcher@example.com"
+

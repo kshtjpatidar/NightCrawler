@@ -51,48 +51,73 @@
 <tr>
 <td width="50%">
 
-### 🔍 Secret Detection
-- **200+ Regex Patterns**
-- AWS, Azure, GCP keys
-- API tokens & secrets
-- Database credentials
-- JWT tokens
-- Private keys
+### 🛡️ Scope & Compliance
+- **Strict Scope Enforcement**
+- Domain & subdomain boundary validation
+- Apex & subdomain exclusions (`tara.uxcam.com`, `connect.uxcam.com`)
+- Lookalike domain rejection (`eviluxcam.com`)
+- Strict URL scheme validation (`http`/`https` only)
+- Hop-by-hop redirect verification
+- Out-of-scope leak prevention across all modules
 
 </td>
 <td width="50%">
 
-### 🔑 Auto-Validation
-- **75+ KeyHacks Validators**
-- GitHub, Stripe, Slack
-- Discord, Twilio, SendGrid
-- OpenAI, Anthropic, Cohere
-- Shodan, VirusTotal
-- Real-time validation
+### ⏱️ Global Rate Limiting & TLS
+- **Shared Token-Bucket Rate Limiter**
+- Max 5 RPS limit shared across all async workers
+- Token consumed on every HTTP attempt & retry
+- Separate token consumed on every redirect hop
+- Full TLS certificate verification (`verify_tls: true`)
+- Rejection of insecure fallback in strict mode
+- Uncoordinated external tools disabled in strict mode
 
 </td>
 </tr>
 <tr>
 <td width="50%">
 
-### 🌐 External Tools
-- **12+ Recon Tools**
-- Subfinder, Httpx
-- Katana, Hakrawler
-- GAU, Waybackurls
-- SubJS, JSLuice
-- GetJS, Mantra
+### 🔍 Secret Detection
+- **200+ Regex Patterns**
+- AWS, Azure, GCP keys
+- API tokens & secrets
+- Passive discovery preserved
+- **Automatic validation disabled by default**
+- Sensitive values masked in logs & reports
+
+</td>
+<td width="50%">
+
+### 🏷️ Researcher Identification
+- **Configurable Header (`X-User-Id`)**
+- Program policy compliant
+- Configured via CLI, YAML, or ENV
+- Passed via subprocess environment (`ps aux` safe)
+- Dispatched only to authorized in-scope hosts
+- Values masked in console and reports
+
+</td>
+</tr>
+<tr>
+<td width="50%">
+
+### 🌐 Tool Integrations
+- **Strict-Aware Integration Wrappers**
+- Subfinder, Httpx, GAU, Waybackurls
+- JSLuice AST analysis
+- Out-of-scope domain filtering on ingestion
+- Uncoordinated tools disabled in strict mode
 
 </td>
 <td width="50%">
 
 ### 📊 Reports
-- **3 Report Formats**
-- HackerOne template
-- BugCrowd template
-- Email format
-- CVSS scores
-- PoC included
+- **Bugcrowd VRT Default Template**
+- HackerOne & Email templates also supported
+- Structured findings: Preconditions, Steps, Impact
+- Masked secret credentials (`AKIA***`)
+- Masked researcher headers
+- HTML and JSON export formats
 
 </td>
 </tr>
@@ -218,33 +243,41 @@ python3 run.py
 
 **Flow:**
 ```
-1. 🔍 Dependency Check    → Auto-checks all tools
-2. 🎯 Enter Target        → example.com
-3. ⚙️ Scan Mode           → [1] Main  [2] Subdomains  [3] Deep
-4. 🔑 Validate Keys?      → [y/n]
-5. 📄 Generate Report?    → [y/n]
-6. 📋 Report Format       → [1] HackerOne  [2] BugCrowd  [3] Email
-7. ✍️ Your Name           → Hunter
-8. 🚀 Start Scan!
+1. 🔍 Dependency Check     → Auto-checks all tools
+2. 🎯 Enter Target         → example.com
+3. ⚙️ Scan Mode            → [1] Main  [2] Subdomains  [3] Deep
+4. 🛡️ Scope Enforcement   → Allowed/excluded domains configured
+5. 🏷️ Researcher Header    → [y/n] e.g. X-User-Id: researcher@example.com
+6. ⏱️ Rate Limiting        → Enforces max 5 RPS
+7. 🔒 TLS Verification     → Strict certificate validation
+8. 🔑 Validate Keys?       → [y/n] (Default: No / passive discovery)
+9. 📄 Generate Report?     → [y/n]
+10. 📋 Report Format       → [1] BugCrowd (default)  [2] HackerOne  [3] Email
+11. ✍️ Your Name            → Hunter
+12. 🚀 Start Scan!
 ```
 
 ### 💻 Command Line Mode
 
 ```bash
-# Basic scan
-python3 main.py -t example.com -o report.html
+# Basic Bug Bounty Scan (UXCam Profile: Scope-enforced, 5 RPS, Researcher Header)
+python3 main.py -t uxcam.com -o report.html
 
-# With KeyHacks validation
-python3 main.py -t example.com -o report.html --validate-keys
+# Pass researcher ID securely via environment variable
+export NIGHTCRAWLER_RESEARCHER_ID="researcher@example.com"
+python3 main.py -t uxcam.com -o report.html
 
-# Subdomain scan + validation
-python3 main.py -t example.com -o report.html --mode subdomains --validate-keys
+# Custom scope domains and explicit exclusions
+python3 main.py -t uxcam.com \
+  --scope-domains uxcam.com,uxc.am \
+  --excluded-domains tara.uxcam.com,connect.uxcam.com \
+  -o report.html
 
-# Deep scan (all tools)
-python3 main.py -t example.com -o report.html --mode deep --validate-keys
+# Deep scan (rate-limited, passive archive extraction, strict scope)
+python3 main.py -t uxcam.com --mode deep -o report.html
 
-# Automated (no prompts)
-python3 main.py -t example.com -o report.html --mode deep --validate-keys --no-prompt
+# Automated execution (no interactive prompts)
+python3 main.py -t uxcam.com -o report.html --no-prompt
 ```
 
 ### 📋 All CLI Options
@@ -253,24 +286,33 @@ python3 main.py -t example.com -o report.html --mode deep --validate-keys --no-p
 Usage: main.py [OPTIONS]
 
 Options:
-  -t, --target TEXT               Target domain
-  -l, --list PATH                 File with list of targets
-  -u, --urls PATH                 File with JS URLs to scan
-  -o, --output PATH               Output file (.json or .html)
-  -c, --concurrency INTEGER       Concurrent requests [default: 50]
-  -d, --depth INTEGER             Crawl depth [default: 2]
-  --timeout INTEGER               Request timeout [default: 30]
-  --mode [main|subdomains|deep]   Scan mode
-  --validate-keys                 Auto-validate secrets
-  --validate-timeout INTEGER      Validation timeout [default: 10]
-  --template [hackerone|bugcrowd|email]   Report format
-  --reporter TEXT                 Reporter name
-  --program TEXT                  Bug bounty program name
-  --no-prompt                     Skip interactive prompts
-  -v, --verbose                   Verbose output
-  -q, --quiet                     Only output findings
-  --version                       Show version
-  --help                          Show help
+  -t, --target TEXT                  Target domain
+  -l, --list PATH                    File with list of targets
+  -u, --urls PATH                    File with JS URLs to scan
+  -o, --output PATH                  Output file (.json or .html)
+  -c, --concurrency INTEGER          Concurrent requests [default: 1]
+  -d, --depth INTEGER                Crawl depth [default: 1]
+  --timeout INTEGER                  Request timeout [default: 30]
+  --max-rps FLOAT                    Max requests per second [default: 5.0]
+  --scope-domains TEXT               Comma-separated allowed domains
+  --excluded-domains TEXT            Comma-separated excluded domains
+  --no-strict-scope                  Allow requests outside strict scope
+  --no-verify-tls                    Disable TLS verification (blocked in strict mode)
+  --header-name TEXT                 Custom researcher HTTP header name
+  --header-value TEXT                Custom researcher HTTP header value
+  --header-env TEXT                  Env var for header value [default: NIGHTCRAWLER_RESEARCHER_ID]
+  --disable-header                   Disable researcher identification header
+  --mode [main|subdomains|deep]      Scan mode [default: main]
+  --validate-keys                    Auto-validate secrets against live APIs (disabled by default)
+  --validate-timeout INTEGER         Validation timeout [default: 10]
+  --template [bugcrowd|hackerone|email]  Report format [default: bugcrowd]
+  --reporter TEXT                    Reporter name
+  --program TEXT                     Bug bounty program name
+  --no-prompt                        Skip interactive prompts
+  -v, --verbose                      Verbose output
+  -q, --quiet                        Only output findings
+  --version                          Show version
+  --help                             Show help
 ```
 
 ---
@@ -280,61 +322,56 @@ Options:
 ### config.yaml
 
 ```yaml
-# Tool paths (leave empty to auto-detect)
-tools:
-  subfinder: ""      # Auto-detect from PATH
-  httpx: ""
-  katana: ""
-  gau: ""
-  waybackurls: ""
+# Scope-aware, rate-limited recon for authorized bug bounty targets
+scope:
+  enabled: true
+  allowed_domains:
+    - uxcam.com
+    - uxc.am
 
-# Scan settings
+  excluded_domains:
+    - tara.uxcam.com
+    - connect.uxcam.com
+
+researcher:
+  custom_header_enabled: true
+  header_name: X-User-Id
+  header_value_env: NIGHTCRAWLER_RESEARCHER_ID
+
 scan:
-  concurrency: 50    # Concurrent requests
-  timeout: 30        # Request timeout (seconds)
-  depth: 2           # Crawl depth
+  concurrency: 1
+  timeout: 30
+  depth: 1
+  max_requests_per_second: 5
+  strict_scope: true
+  verify_tls: true
 
-# Report settings
+features:
+  javascript_extraction: true
+  endpoint_discovery: true
+  secret_detection: true
+  validate_keys: false
+  external_secret_validation: false
+
 report:
-  default_template: hackerone
-  default_reporter: YourName
-```
-
-### Custom Tool Paths
-
-If your tools are in a custom location:
-
-```yaml
-tools:
-  subfinder: "/path/to/subfinder"
-  katana: "/custom/path/katana"
+  default_template: bugcrowd
+  default_format: html
 ```
 
 ---
 
-## 🔑 KeyHacks Validators
+## 🔒 Security & Bug Bounty Compliance Architecture
 
-<details>
-<summary><b>75+ Supported Services (Click to expand)</b></summary>
+NightCrawler v5.0 includes architecture designed specifically for bug bounty rules of engagement:
 
-| Category | Services |
-|----------|----------|
-| **Cloud Providers** | AWS, Google Cloud, Firebase, Azure, DigitalOcean, Heroku, Vercel, Netlify, Cloudflare |
-| **Git & CI/CD** | GitHub, GitLab, CircleCI, Travis CI, NPM, Bitbucket |
-| **Payment** | Stripe, PayPal, Square, Razorpay, Braintree |
-| **Messaging** | Slack, Discord, Telegram, Twilio |
-| **Email** | SendGrid, MailGun, MailChimp, Postmark |
-| **Security/Recon** | Shodan, VirusTotal, Censys, SecurityTrails |
-| **AI/ML** | OpenAI, Anthropic/Claude, Cohere, Replicate, Pinecone |
-| **Databases** | Supabase, PlanetScale, MongoDB Atlas, Firebase |
-| **Productivity** | Notion, Figma, Airtable, Linear, Jira, Confluence, Asana, Monday, ClickUp |
-| **Analytics** | Datadog, Sentry, New Relic, Mixpanel, Amplitude, PagerDuty |
-| **Social** | Facebook, Twitter/X, Instagram, LinkedIn, Spotify |
-| **Storage** | Dropbox, Box, Google Drive |
-| **Auth** | Auth0, Clerk, Okta |
-| **Other** | Mapbox, Algolia, HubSpot, Zendesk, LaunchDarkly, Intercom |
-
-</details>
+| Policy Requirement | Implementation Details |
+|--------------------|------------------------|
+| **Global Rate Limiting** | Centralized token-bucket rate limiter enforcing max 5 requests/sec across all concurrent asynchronous workers. A token is consumed before every initial request, retry, and redirect hop. |
+| **Strict Scope Enforcement** | Subdomain and apex boundary parsing with exclusion matching. Prevents lookalike domain bypasses (`eviluxcam.com`). Enforced before any network request and on tool output. |
+| **TLS Certificate Verification** | Standard SSL verification with zero silent insecure fallback. Insecure TLS (`verify_tls: false`) is strictly prohibited in strict compliance mode. |
+| **Researcher Identification** | `X-User-Id` header sent **exclusively** to authorized in-scope targets. Passed via environment variables to subprocesses to prevent `ps aux` command-line disclosure. Masked in console logs and reports. |
+| **KeyHacks Safety** | Automatic active credential validation against third-party APIs is **disabled by default**. Passive regex discovery is preserved, and credential values are masked in generated reports. |
+| **Tool Orchestration** | External CLI crawlers that cannot guarantee rate limit coordination or header isolation (e.g. Katana, Hakrawler, SubJS, GetJS) are automatically disabled in strict compliance mode. Passive recon tools (Subfinder, GAU, Waybackurls, JSLuice) are strictly filtered against the scope manager on ingestion. |
 
 ---
 
@@ -342,26 +379,29 @@ tools:
 
 ```
 NightCrawler/
-├── 📄 run.py              # Interactive mode entry
-├── 📄 main.py             # CLI mode entry
-├── 📄 requirements.txt    # Python dependencies
-├── 📄 config.yaml         # Configuration
+├── 📄 run.py                     # Interactive mode entry (subprocess env isolation)
+├── 📄 main.py                    # CLI mode entry with strict compliance validation
+├── 📄 requirements.txt           # Python dependencies
+├── 📄 config.yaml                # Scope, rate limit, researcher header & report config
 ├── 📁 src/
 │   ├── 📁 core/
-│   │   └── scanner.py     # Main scanning logic
+│   │   ├── scanner.py            # Main scanning logic & scope orchestration
+│   │   ├── scope.py              # ScopeManager (boundary, exclusion, lookalike checks)
+│   │   ├── rate_limiter.py       # GlobalRateLimiter (token bucket, retry/redirect aware)
+│   │   ├── header_manager.py     # HeaderManager (X-User-Id, env vars, masking)
+│   │   └── http_client.py        # NightCrawlerHttpClient (strict TLS & rate limited)
 │   ├── 📁 patterns/
-│   │   └── secrets.py     # 200+ regex patterns
+│   │   └── secrets.py            # 200+ regex patterns for passive secret detection
 │   ├── 📁 validators/
-│   │   └── keyhacks.py    # 75+ API validators
+│   │   └── keyhacks.py           # KeyHacks validator (safe/passive by default)
 │   ├── 📁 integrations/
-│   │   └── tools.py       # External tool wrappers
+│   │   └── tools.py              # External tool wrappers with strict mode compliance
 │   ├── 📁 output/
-│   │   ├── html_report.py # Report generator
-│   │   └── console.py     # Console output
+│   │   ├── html_report.py        # Report generator (Bugcrowd VRT, masked secrets)
+│   │   └── console.py            # Console output with credential masking
 │   └── 📁 ui/
-│       └── banner.py      # UI components
-└── 📁 data/
-    └── patterns/          # Custom patterns
+│       └── banner.py             # UI components
+└── 📁 tests/                     # 31 automated security & compliance tests
 ```
 
 ---

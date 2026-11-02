@@ -129,8 +129,13 @@ def run_scan_subprocess(target: str, cfg: NightCrawlerConfig):
     for ed in cfg.excluded_domains:
         cmd.extend(["--excluded-domain", ed])
 
+    env = dict(os.environ)
     if cfg.custom_header_enabled and cfg.header_value:
-        cmd.extend(["--header-name", cfg.header_name, "--header-value", cfg.header_value])
+        cmd.extend(["--header-name", cfg.header_name])
+        # Pass sensitive header values strictly via subprocess environment rather than CLI arguments
+        header_env_key = cfg.header_value_env or "NIGHTCRAWLER_RESEARCHER_ID"
+        env[header_env_key] = cfg.header_value
+        env["NIGHTCRAWLER_HEADER_VALUE"] = cfg.header_value
     else:
         cmd.append("--disable-header")
 
@@ -145,16 +150,10 @@ def run_scan_subprocess(target: str, cfg: NightCrawlerConfig):
     if cfg.validate_keys:
         cmd.append("--validate-keys")
 
-    # Safe display command with masked header
-    display_cmd = list(cmd)
-    if "--header-value" in display_cmd:
-        idx = display_cmd.index("--header-value")
-        display_cmd[idx + 1] = cfg.get_header_manager().get_masked_value()
-
-    console.print(f"[dim]Command: {' '.join(display_cmd)}[/dim]\n")
+    console.print(f"[dim]Command: {' '.join(cmd)}[/dim]\n")
 
     try:
-        result = subprocess.run(cmd, cwd=Path(__file__).parent)
+        result = subprocess.run(cmd, cwd=Path(__file__).parent, env=env)
         if result.returncode == 0:
             console.print("\n[bold green]✓ Reconnaissance completed successfully![/bold green]")
         else:

@@ -140,6 +140,12 @@ def main(target, target_list, urls, output, concurrency, depth, timeout,
     if validate_keys:
         cfg.validate_keys = True
 
+    # P1: Reject insecure TLS configuration when strict mode is enabled
+    if cfg.strict_scope and not cfg.verify_tls:
+        click.echo(click.style("\n[!] SECURITY VIOLATION: Insecure TLS configuration is prohibited in strict compliance mode!", fg='red', bold=True))
+        click.echo(click.style("    TLS certificate verification must remain enabled.\n", fg='yellow'))
+        sys.exit(1)
+
     # Validate target presence
     if not any([target, target_list, urls, offline]):
         click.echo(click.style("┌─────────────────────────────────────────────────────────────┐", fg='red'))
