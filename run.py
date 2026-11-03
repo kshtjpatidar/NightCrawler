@@ -13,6 +13,7 @@ import subprocess
 import time
 import json
 from pathlib import Path
+from typing import Optional, Dict, Any, List
 
 sys.path.insert(0, str(Path(__file__).parent))
 
@@ -72,10 +73,11 @@ def print_banner(active_prog_name: str = "UXCam", active_rps: float = 5.0):
     console.print("[dim]⚠️  Ethical Bug Bounty Reconnaissance Only • Keep Learning // Keep Hacking[/dim]\n")
 
 
-def display_main_menu(active_profile: ProgramProfile):
+def display_main_menu(active_profile: Optional[ProgramProfile]):
     """Display the 14-item interactive control menu"""
+    active_title = f"{active_profile.name} ({active_profile.id})" if active_profile else "None (Select/Create a profile)"
     table = Table(
-        title=f"[bold cyan]🎯 NightCrawler Control Center — Active Program: [magenta]{active_profile.name} ({active_profile.id})[/][/]",
+        title=f"[bold cyan]🎯 NightCrawler Control Center — Active Program: [magenta]{active_title}[/][/]",
         show_header=True,
         header_style="bold cyan",
         border_style="cyan"
@@ -84,14 +86,17 @@ def display_main_menu(active_profile: ProgramProfile):
     table.add_column("Management & Recon Operation", style="white", width=42)
     table.add_column("Status / Setting", style="yellow", width=28)
 
-    table.add_row("[1]", "Select program", f"{active_profile.name} ({active_profile.id})")
+    table.add_row("[1]", "Select program", active_title)
     table.add_row("[2]", "List programs", "View all program profiles")
     table.add_row("[3]", "Create program profile", "Add new program profile")
     table.add_row("[4]", "Import policy", "YAML / JSON / Text import")
     table.add_row("[5]", "Validate program policy", "Run compliance & safety checks")
-    table.add_row("[6]", "View program scope", f"{len(active_profile.scope.allowed_domains)} allowed, {len(active_profile.scope.excluded_domains)} excluded")
-    table.add_row("[7]", "Configure authentication", f"Auth type: {active_profile.authentication.type.upper()}")
-    table.add_row("[8]", "Configure request limits", f"{active_profile.request_policy.max_rps} RPS (Concurrency: {active_profile.request_policy.concurrency})")
+    scope_status = f"{len(active_profile.scope.allowed_domains)} allowed, {len(active_profile.scope.excluded_domains)} excluded" if active_profile else "No profile active"
+    table.add_row("[6]", "View program scope", scope_status)
+    auth_status = f"Auth type: {active_profile.authentication.type.upper()}" if active_profile else "No profile active"
+    table.add_row("[7]", "Configure authentication", auth_status)
+    req_status = f"{active_profile.request_policy.max_rps} RPS (Concurrency: {active_profile.request_policy.concurrency})" if active_profile else "No profile active"
+    table.add_row("[8]", "Configure request limits", req_status)
     table.add_row("[9]", "Select reconnaissance modules", "Configure active / passive tools")
     table.add_row("[10]", "Start reconnaissance", "[bold green]🚀 Run Recon Scan[/]")
     table.add_row("[11]", "View reports", "Open generated reports")
@@ -193,17 +198,24 @@ def main():
             if all_profs:
                 active_profile = pm.get_profile(all_profs[0]["id"])
             else:
-                active_profile = pm.create_profile({"id": "uxcam", "name": "UXCam Bug Bounty Program"})
+                active_profile = None
 
-        target = "uxcam.com"
+        target = active_profile.scope.allowed_domains[0].lstrip("*.") if (active_profile and active_profile.scope.allowed_domains) else ""
 
         while True:
-            print_banner(active_profile.name, active_profile.request_policy.max_rps)
+            banner_name = active_profile.name if active_profile else "No Active Program"
+            banner_rps = active_profile.request_policy.max_rps if active_profile else 0.0
+            print_banner(banner_name, banner_rps)
             table = display_main_menu(active_profile)
             console.print(table)
             console.print()
 
             choice = Prompt.ask("[bold white]Select an option [1-14][/bold white]", default="10")
+
+            if choice in ("5", "6", "7", "8", "9", "10", "12") and not active_profile:
+                console.print("\n[bold red]❌ No program profile active. Please select [1], create [3], or import [4] a valid program profile first.[/]\n")
+                Prompt.ask("Press Enter to continue", default="")
+                continue
 
             if choice == "1":
                 # Select program

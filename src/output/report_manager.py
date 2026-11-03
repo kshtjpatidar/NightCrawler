@@ -34,12 +34,27 @@ class ReportManager:
     def __init__(
         self,
         profile: Optional[ProgramProfile] = None,
-        reporter_name: str = "Security Researcher",
-        policy: Optional[Any] = None
+        reporter_name: Optional[str] = None,
+        policy: Optional[Any] = None,
+        **kwargs
     ):
-        self.profile = profile
+        # Support passing policy as first positional argument
+        if profile is not None and not isinstance(profile, ProgramProfile) and hasattr(profile, "scope_manager"):
+            policy = profile
+            profile = getattr(policy, "profile", None)
+
         self.policy = policy
-        self.reporter_name = reporter_name
+        self.profile = profile
+        if self.profile is None and self.policy and getattr(self.policy, "profile", None):
+            self.profile = self.policy.profile
+
+        if reporter_name:
+            self.reporter_name = reporter_name
+        elif self.policy and getattr(self.policy, "reporter_name", None):
+            self.reporter_name = self.policy.reporter_name
+        else:
+            self.reporter_name = "Security Researcher"
+
         self.timestamp = datetime.datetime.now(datetime.timezone.utc)
 
     def _build_base_dict(self, findings: List, scan_result, tools_report: Optional[Dict[str, Any]] = None, stats: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -144,8 +159,8 @@ class ReportManager:
                 "scan_duration_seconds": round(getattr(scan_result, 'scan_time', 0.0), 2) if scan_result else 0.0
             },
             "scope_decisions": {
-                "allowed_domains": list(self.profile.scope.allowed_domains) if self.profile else [],
-                "excluded_domains": list(self.profile.scope.excluded_domains) if self.profile else [],
+                "allowed_domains": list(self.profile.scope.allowed_domains) if self.profile else (list(self.policy.scope_manager.allowed_domains) if (self.policy and hasattr(self.policy, "scope_manager")) else []),
+                "excluded_domains": list(self.profile.scope.excluded_domains) if self.profile else (list(self.policy.scope_manager.excluded_domains) if (self.policy and hasattr(self.policy, "scope_manager")) else []),
                 "allowed_cidrs": list(self.profile.scope.allowed_cidrs) if self.profile else [],
                 "excluded_paths": list(self.profile.scope.excluded_paths) if self.profile else [],
                 "third_party_exclusions": list(self.profile.scope.third_party_hosted_exclusions) if self.profile else []
@@ -272,8 +287,15 @@ class ReportManager:
             out_file.write_text(content, encoding="utf-8")
         elif ext in (".html", ".htm"):
             # HTML report
-            template = self.profile.reporting.default_template if self.profile else "bugcrowd"
-            program_name = self.profile.reporting.program_name if self.profile else "Bug Bounty Program"
+            if self.policy and hasattr(self.policy, "default_template"):
+                template = self.policy.default_template
+                program_name = self.policy.program_name
+            elif self.profile:
+                template = self.profile.reporting.default_template
+                program_name = self.profile.reporting.program_name
+            else:
+                template = "bugcrowd"
+                program_name = "Bug Bounty Program"
             rep_cfg = ReportConfig(
                 reporter_name=self.reporter_name,
                 program_name=program_name,

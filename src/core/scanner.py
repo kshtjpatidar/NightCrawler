@@ -473,7 +473,13 @@ class NightCrawlerScanner:
             if self.tool_compatibility_manager:
                 ok, _ = self.tool_compatibility_manager.is_tool_compatible(tool_name)
                 return ok
-            return True
+            # Defect 7: Never allow can_use_tool() to default to True when compatibility manager
+            # is missing in policy-aware scan. Network-capable tools must be blocked unless
+            # scope & rate controls are guaranteed.
+            cap = ToolCompatibilityManager.TOOL_REGISTRY.get(tool_name.lower().strip())
+            if cap and not cap.makes_live_requests:
+                return True
+            return False
         
         # Phase 1: Subdomain Enumeration
         if can_use_tool("subfinder") and self.subfinder.is_available():
@@ -523,12 +529,13 @@ class NightCrawlerScanner:
         # Phase 3: Direct page scanning for JS with verified TLS and rate limiter
         connector = aiohttp.TCPConnector(
             limit=self.concurrency,
-            ssl=self._create_ssl_context()
+            ssl=self._create_ssl_context(),
+            resolver=self.http_client.get_resolver() if hasattr(self.http_client, "get_resolver") else None
         )
         async with aiohttp.ClientSession(timeout=self.timeout, connector=connector) as session:
             console.print(f"\n[cyan][*] Fetching pages from {len(subdomains)} in-scope hosts (rate limit: {self.max_requests_per_second} RPS)...[/]")
             
-            semaphore = asyncio.Semaphore(self.concurrency)
+            semaphore = self.request_policy_manager.get_semaphore() if self.request_policy_manager else asyncio.Semaphore(self.concurrency)
 
             async def fetch_page_js(subdomain):
                 async with semaphore:
@@ -594,7 +601,11 @@ class NightCrawlerScanner:
         console.print(f"[bold]Rate Limit:[/] [cyan]{self.max_requests_per_second} RPS[/]")
         console.print()
         
-        connector = aiohttp.TCPConnector(limit=self.concurrency, ssl=self._create_ssl_context())
+        connector = aiohttp.TCPConnector(
+            limit=self.concurrency,
+            ssl=self._create_ssl_context(),
+            resolver=self.http_client.get_resolver() if hasattr(self.http_client, "get_resolver") else None
+        )
         async with aiohttp.ClientSession(timeout=self.timeout, connector=connector) as session:
             with Progress(
                 SpinnerColumn(),
@@ -605,7 +616,7 @@ class NightCrawlerScanner:
                 console=console
             ) as progress:
                 task = progress.add_task("[cyan]🔍 Scanning (rate-limited)...", total=len(urls))
-                semaphore = asyncio.Semaphore(self.concurrency)
+                semaphore = self.request_policy_manager.get_semaphore() if self.request_policy_manager else asyncio.Semaphore(self.concurrency)
                 
                 async def scan_with_progress(url):
                     async with semaphore:

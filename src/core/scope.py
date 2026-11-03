@@ -254,7 +254,7 @@ class ScopeManager:
 
         return False
 
-    def validate_destination_ip(self, host_or_ip: str) -> Tuple[bool, str]:
+    def validate_destination_ip(self, host_or_ip: str, is_dns_resolution: bool = False) -> Tuple[bool, str]:
         """
         Validate whether an IP address or resolved IP is safe and conforms to program network policy.
         Returns (is_safe, reason).
@@ -274,8 +274,8 @@ class ScopeManager:
         if self.is_ip_prohibited(ip_obj):
             return False, f"Destination IP '{ip_obj}' is prohibited (internal, loopback, or link-local address)."
 
-        # If scope is enabled, verify it's allowed if non-domain scope is in use
-        if self.enabled:
+        # If this is a direct IP target (not resolved from an in-scope domain), verify IP allowlist
+        if not is_dns_resolution and self.enabled and (self.allowed_ips or self.allowed_cidrs):
             if not self.is_ip_allowed(ip_obj):
                 return False, f"Destination IP '{ip_obj}' is not in authorized IP/CIDR scope."
 

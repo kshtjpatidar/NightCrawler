@@ -155,9 +155,14 @@ class ToolCompatibilityManager:
 
         cap = self.TOOL_REGISTRY[t_name]
 
-        # 1. Explicit profile tool restrictions
-        if t_name in self.profile.tool_restrictions.disabled_tools:
+        # 1. Explicit profile tool restrictions: denylist then allowlist
+        disabled = [d.lower().strip() for d in self.profile.tool_restrictions.disabled_tools]
+        if t_name in disabled:
             return False, f"Explicitly disabled by program profile '{self.profile.id}'."
+
+        allowed = [a.lower().strip() for a in self.profile.tool_restrictions.allowed_tools]
+        if allowed and t_name != "nightcrawler_http" and t_name not in allowed:
+            return False, f"Tool '{tool_name}' is disabled: not permitted by profile '{self.profile.id}' tool allowlist."
 
         # 2. Testing permissions check: if active recon is prohibited, disable active tools
         if cap.is_active and not self.profile.testing_permissions.active_recon:

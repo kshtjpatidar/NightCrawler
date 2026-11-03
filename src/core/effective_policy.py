@@ -94,6 +94,14 @@ class EffectivePolicy:
             requires_review = profile.requires_review
             review_notes = list(profile.review_notes)
 
+            # Safety Check: Enforce review requirement on imported/unverified profiles
+            if requires_review and not overrides.get("confirm_review"):
+                notes_str = f" Notes: {'; '.join(review_notes)}" if review_notes else ""
+                raise ValueError(
+                    f"Program profile '{p_id}' requires manual review before scanning can proceed.{notes_str} "
+                    f"Pass --confirm-review to acknowledge and proceed."
+                )
+
             base_rps = profile.request_policy.max_rps
             base_per_host_rps = profile.request_policy.per_host_rps
             base_concurrency = profile.request_policy.concurrency
@@ -229,12 +237,30 @@ class EffectivePolicy:
         if effective_strict_scope and not effective_verify_tls:
             raise ValueError("Insecure TLS configuration is prohibited in strict compliance mode.")
 
-        # Scope additions
+        # Scope additions and narrowing
         if overrides.get("allowed_domains"):
-            for d in overrides["allowed_domains"]:
-                d_str = str(d).strip()
-                if d_str and d_str not in allowed_domains:
-                    allowed_domains.append(d_str)
+            if profile:
+                profile_scope = ScopeManager.from_profile(profile)
+                narrowed = []
+                for d in overrides["allowed_domains"]:
+                    d_str = str(d).strip()
+                    if not d_str:
+                        continue
+                    clean_d = ScopeManager._normalize_domain(d_str)
+                    if not profile_scope.is_host_allowed(clean_d):
+                        raise ValueError(
+                            f"CLI cannot expand program '{profile.id}' authorized scope with '{d_str}'. "
+                            f"Target is outside authorized profile scope. Only scope narrowing is permitted."
+                        )
+                    narrowed.append(d_str)
+                if not narrowed:
+                    raise ValueError(f"Target scope cannot be empty after narrowing program '{profile.id}' scope.")
+                allowed_domains = narrowed
+            else:
+                for d in overrides["allowed_domains"]:
+                    d_str = str(d).strip()
+                    if d_str and d_str not in allowed_domains:
+                        allowed_domains.append(d_str)
 
         if overrides.get("excluded_domains"):
             for d in overrides["excluded_domains"]:

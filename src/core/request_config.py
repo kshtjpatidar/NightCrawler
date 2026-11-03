@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from src.core.scope import ScopeManager
 from src.core.rate_limiter import GlobalRateLimiter
 from src.core.header_manager import HeaderManager
+from src.core.program_profile import strict_bool, strict_positive_float, strict_positive_int
 
 
 @dataclass
@@ -137,76 +138,82 @@ def load_config(config_file: Optional[str] = None) -> NightCrawlerConfig:
     """Load configuration from config.yaml, environment variables, with defaults."""
     cfg = NightCrawlerConfig()
 
-    paths_to_try = [
-        config_file,
-        "config.yaml",
-        Path(__file__).parent.parent.parent / "config.yaml"
-    ]
-
-    for p in paths_to_try:
-        if p and Path(p).exists():
-            try:
-                with open(p, "r", encoding="utf-8") as f:
-                    data = yaml.safe_load(f) or {}
-
-                # Scope
-                scope = data.get("scope", {})
-                if "enabled" in scope:
-                    cfg.scope_enabled = bool(scope["enabled"])
-                if "allowed_domains" in scope:
-                    cfg.allowed_domains = [str(d) for d in scope["allowed_domains"] if d]
-                if "excluded_domains" in scope:
-                    cfg.excluded_domains = [str(d) for d in scope["excluded_domains"] if d]
-
-                # Researcher
-                res = data.get("researcher", {})
-                if "custom_header_enabled" in res:
-                    cfg.custom_header_enabled = bool(res["custom_header_enabled"])
-                if "header_name" in res:
-                    cfg.header_name = str(res["header_name"])
-                if "header_value_env" in res:
-                    cfg.header_value_env = str(res["header_value_env"])
-                if "header_value" in res:
-                    cfg.header_value = str(res["header_value"])
-
-                # Scan
-                scan = data.get("scan", {})
-                if "concurrency" in scan:
-                    cfg.concurrency = int(scan["concurrency"])
-                if "timeout" in scan:
-                    cfg.timeout = int(scan["timeout"])
-                if "depth" in scan:
-                    cfg.depth = int(scan["depth"])
-                if "max_requests_per_second" in scan:
-                    cfg.max_requests_per_second = float(scan["max_requests_per_second"])
-                if "strict_scope" in scan:
-                    cfg.strict_scope = bool(scan["strict_scope"])
-                if "verify_tls" in scan:
-                    cfg.verify_tls = bool(scan["verify_tls"])
-
-                # Features
-                feat = data.get("features", {})
-                if "javascript_extraction" in feat:
-                    cfg.javascript_extraction = bool(feat["javascript_extraction"])
-                if "endpoint_discovery" in feat:
-                    cfg.endpoint_discovery = bool(feat["endpoint_discovery"])
-                if "secret_detection" in feat:
-                    cfg.secret_detection = bool(feat["secret_detection"])
-                if "validate_keys" in feat:
-                    cfg.validate_keys = bool(feat["validate_keys"])
-                if "external_secret_validation" in feat:
-                    cfg.external_secret_validation = bool(feat["external_secret_validation"])
-
-                # Report
-                rep = data.get("report", {})
-                if "default_template" in rep:
-                    cfg.default_template = str(rep["default_template"])
-                if "default_format" in rep:
-                    cfg.default_format = str(rep["default_format"])
-
+    target_path = None
+    if config_file:
+        p = Path(config_file)
+        if not p.exists():
+            raise FileNotFoundError(f"Specified configuration file '{config_file}' not found.")
+        target_path = p
+    else:
+        for p in ["config.yaml", Path(__file__).parent.parent.parent / "config.yaml"]:
+            p_obj = Path(p)
+            if p_obj.exists():
+                target_path = p_obj
                 break
-            except Exception as e:
-                pass
+
+    if target_path:
+        with open(target_path, "r", encoding="utf-8") as f:
+            data = yaml.safe_load(f)
+
+        if data is None:
+            data = {}
+        elif not isinstance(data, dict):
+            raise ValueError(f"Configuration file '{target_path}' must contain a YAML mapping/dictionary.")
+
+        # Scope
+        scope = data.get("scope", {})
+        if "enabled" in scope:
+            cfg.scope_enabled = strict_bool(scope["enabled"], "scope.enabled")
+        if "allowed_domains" in scope:
+            cfg.allowed_domains = [str(d) for d in scope["allowed_domains"] if d]
+        if "excluded_domains" in scope:
+            cfg.excluded_domains = [str(d) for d in scope["excluded_domains"] if d]
+
+        # Researcher
+        res = data.get("researcher", {})
+        if "custom_header_enabled" in res:
+            cfg.custom_header_enabled = strict_bool(res["custom_header_enabled"], "researcher.custom_header_enabled")
+        if "header_name" in res:
+            cfg.header_name = str(res["header_name"])
+        if "header_value_env" in res:
+            cfg.header_value_env = str(res["header_value_env"])
+        if "header_value" in res:
+            cfg.header_value = str(res["header_value"])
+
+        # Scan
+        scan = data.get("scan", {})
+        if "concurrency" in scan:
+            cfg.concurrency = strict_positive_int(scan["concurrency"], "scan.concurrency")
+        if "timeout" in scan:
+            cfg.timeout = strict_positive_int(scan["timeout"], "scan.timeout")
+        if "depth" in scan:
+            cfg.depth = strict_positive_int(scan["depth"], "scan.depth")
+        if "max_requests_per_second" in scan:
+            cfg.max_requests_per_second = strict_positive_float(scan["max_requests_per_second"], "scan.max_requests_per_second")
+        if "strict_scope" in scan:
+            cfg.strict_scope = strict_bool(scan["strict_scope"], "scan.strict_scope")
+        if "verify_tls" in scan:
+            cfg.verify_tls = strict_bool(scan["verify_tls"], "scan.verify_tls")
+
+        # Features
+        feat = data.get("features", {})
+        if "javascript_extraction" in feat:
+            cfg.javascript_extraction = strict_bool(feat["javascript_extraction"], "features.javascript_extraction")
+        if "endpoint_discovery" in feat:
+            cfg.endpoint_discovery = strict_bool(feat["endpoint_discovery"], "features.endpoint_discovery")
+        if "secret_detection" in feat:
+            cfg.secret_detection = strict_bool(feat["secret_detection"], "features.secret_detection")
+        if "validate_keys" in feat:
+            cfg.validate_keys = strict_bool(feat["validate_keys"], "features.validate_keys")
+        if "external_secret_validation" in feat:
+            cfg.external_secret_validation = strict_bool(feat["external_secret_validation"], "features.external_secret_validation")
+
+        # Report
+        rep = data.get("report", {})
+        if "default_template" in rep:
+            cfg.default_template = str(rep["default_template"])
+        if "default_format" in rep:
+            cfg.default_format = str(rep["default_format"])
 
     # Environment variables override config
     env_researcher_id = os.getenv(cfg.header_value_env)

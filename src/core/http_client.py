@@ -16,6 +16,8 @@ import ipaddress
 from typing import Optional, Dict, Tuple, Any, List
 from urllib.parse import urljoin, urlparse
 import aiohttp
+import aiohttp.abc
+import aiohttp.resolver
 
 from src.core.scope import ScopeManager
 from src.core.rate_limiter import GlobalRateLimiter
@@ -27,6 +29,50 @@ logger = logging.getLogger("nightcrawler.http")
 class ScopeViolationError(Exception):
     """Raised when an HTTP request or redirect targets an out-of-scope host."""
     pass
+
+
+class PolicyAwareResolver(aiohttp.abc.AbstractResolver):
+    """
+    DNS Resolver enforcing policy-based IP safety and DNS pinning.
+    Prevents DNS rebinding attacks by ensuring connections connect exclusively
+    to IP addresses validated by policy.
+    """
+    def __init__(self, http_client: "NightCrawlerHttpClient"):
+        self.http_client = http_client
+
+    async def resolve(
+        self, host: str, port: int = 0, family: socket.AddressFamily = socket.AF_INET
+    ) -> List[aiohttp.resolver.ResolveResult]:
+        safe, reason = await self.http_client.validate_host_network_safety(host)
+        if not safe:
+            raise OSError(f"Connection blocked by network policy: {reason}")
+
+        pinned_ips = self.http_client._pinned_ips.get(host, [])
+        if not pinned_ips:
+            try:
+                ipaddress.ip_address(host)
+                pinned_ips = [host]
+            except ValueError:
+                raise OSError(f"No validated IP available for host '{host}'")
+
+        results = []
+        for ip_str in pinned_ips:
+            ip_obj = ipaddress.ip_address(ip_str)
+            addr_family = socket.AF_INET6 if ip_obj.version == 6 else socket.AF_INET
+            results.append(
+                aiohttp.resolver.ResolveResult(
+                    hostname=host,
+                    host=ip_str,
+                    port=port,
+                    family=addr_family,
+                    proto=socket.IPPROTO_TCP,
+                    flags=socket.AI_NUMERICHOST,
+                )
+            )
+        return results
+
+    async def close(self) -> None:
+        pass
 
 
 class NightCrawlerHttpClient:
@@ -97,31 +143,64 @@ class NightCrawlerHttpClient:
         else:
             self.ssl_context = False
 
+        # DNS Pinning cache: maps validated host -> list of authorized IP strings
+        self._pinned_ips: Dict[str, List[str]] = {}
+
+    def get_resolver(self) -> aiohttp.abc.AbstractResolver:
+        """Return a policy-aware DNS resolver that enforces policy validation and DNS pinning."""
+        return PolicyAwareResolver(self)
+
     async def validate_host_network_safety(self, host: Optional[str]) -> Tuple[bool, str]:
-        """Verify that the host does not resolve to a prohibited private, loopback, or internal IP."""
+        """
+        Verify that the host does not resolve to a prohibited private, loopback, or internal IP.
+        Fails closed on DNS resolution failures or any prohibited IP in DNS answers.
+        Pins validated IP addresses in memory to prevent DNS rebinding.
+        """
         if not host:
             return False, "Empty or missing host"
 
         # Check if host is directly an IP
         try:
             ip_obj = ipaddress.ip_address(host)
-            return self.scope_manager.validate_destination_ip(str(ip_obj))
+            safe, reason = self.scope_manager.validate_destination_ip(str(ip_obj), is_dns_resolution=False)
+            if safe:
+                self._pinned_ips[host] = [str(ip_obj)]
+            return safe, reason
         except ValueError:
             pass
 
-        # Check DNS resolution
+        # If already pinned and validated for this session, return pinned result
+        if host in self._pinned_ips:
+            pinned = self._pinned_ips[host]
+            if not pinned:
+                return False, f"DNS resolution failed for host '{host}': Cached failure."
+            return True, f"Destination conforms to network policy (pinned IP: {pinned[0]})."
+
+        # Check DNS resolution - fail closed
         try:
             loop = asyncio.get_running_loop()
             addrinfo = await loop.getaddrinfo(host, None, proto=socket.IPPROTO_TCP)
+            if not addrinfo:
+                return False, f"DNS resolution failed for host '{host}': No DNS records returned."
+
+            validated_ips = []
             for family, socktype, proto, canonname, sockaddr in addrinfo:
                 ip_str = sockaddr[0]
-                safe, reason = self.scope_manager.validate_destination_ip(ip_str)
+                safe, reason = self.scope_manager.validate_destination_ip(ip_str, is_dns_resolution=True)
                 if not safe:
+                    # Mixed DNS answers: if even one resolved IP is prohibited, fail closed immediately
                     return False, f"Host '{host}' resolves to prohibited IP '{ip_str}': {reason}"
-        except Exception as e:
-            logger.debug(f"[DNS] Host network check for {host}: {e}")
+                if ip_str not in validated_ips:
+                    validated_ips.append(ip_str)
 
-        return True, "Destination conforms to network policy."
+            if not validated_ips:
+                return False, f"DNS resolution failed for host '{host}': No valid IP addresses."
+
+            # Pin validated IPs to prevent DNS rebinding
+            self._pinned_ips[host] = validated_ips
+            return True, f"Destination conforms to network policy (pinned IP: {validated_ips[0]})."
+        except Exception as e:
+            return False, f"DNS resolution failed for host '{host}': {e}"
 
     async def get(
         self,

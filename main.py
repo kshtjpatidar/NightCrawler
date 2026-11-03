@@ -93,13 +93,15 @@ def show_scan_mode_menu():
 @click.option('--reporter', default=None, help='Reporter name for the report')
 @click.option('--reporter-email', default=None, help='Reporter email address')
 @click.option('--program', default=None, help='Bug bounty program profile ID (e.g. uxcam, example-program)')
+@click.option('--confirm-review', is_flag=True, default=False,
+              help='Acknowledge and confirm manual review of a review-required program profile')
 @click.version_option(version='5.0.0', prog_name='NightCrawler')
 @click.pass_context
 def main(ctx, target, target_list, urls, output, concurrency, depth, timeout, 
          offline, patterns, verbose, quiet, config_file, mode, no_prompt,
          max_rps, allowed_domains, excluded_domains, scope_enabled, verify_tls, strict_scope,
          header_name, header_value, enable_header, validate_keys, validate_timeout,
-         template, reporter, reporter_email, program):
+         template, reporter, reporter_email, program, confirm_review):
     """
     NightCrawler v5.0 - Multi-Program, Policy-Aware Bug Bounty Reconnaissance Framework
     
@@ -216,7 +218,8 @@ def main(ctx, target, target_list, urls, output, concurrency, depth, timeout,
         "template": template,
         "reporter": reporter,
         "reporter_email": reporter_email,
-        "validate_keys": validate_keys if validate_keys else None
+        "validate_keys": validate_keys if validate_keys else None,
+        "confirm_review": confirm_review if confirm_review else None
     }
     # Filter out None values so EffectivePolicy uses base profile/config values
     cli_overrides = {k: v for k, v in cli_overrides.items() if v is not None}
@@ -350,6 +353,14 @@ def main(ctx, target, target_list, urls, output, concurrency, depth, timeout,
             click.echo(click.style("[!] Reconnaissance cancelled by user.", fg="yellow"))
             return
 
+    # P0 Authentication Ordering: Validate credentials BEFORE constructing scanner or external tool processes
+    try:
+        if not offline:
+            effective_policy.validate_ready_to_scan()
+    except ValueError as auth_err:
+        click.echo(click.style(f"\n[!] AUTHENTICATION ERROR: {auth_err}\n", fg='red', bold=True))
+        sys.exit(1)
+
     # Initialize Scanner with Authoritative EffectivePolicy
     scanner = NightCrawlerScanner(
         concurrency=effective_policy.concurrency,
@@ -379,7 +390,6 @@ def main(ctx, target, target_list, urls, output, concurrency, depth, timeout,
     )
 
     try:
-        effective_policy.validate_ready_to_scan()
         if offline:
             asyncio.run(scanner.scan_directory(Path(offline)))
         elif urls:
