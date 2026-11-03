@@ -21,7 +21,8 @@ class AuditLogger:
 
     REDACTED_PARAMS = {
         "token", "api_key", "apikey", "key", "secret", "password", "pass",
-        "auth", "session", "jwt", "access_token", "refresh_token", "code"
+        "auth", "session", "jwt", "access_token", "refresh_token", "code",
+        "circle_token", "circle-token", "webhook_token"
     }
 
     def __init__(self, program_id: str = "default", log_file: Optional[Path] = None):
@@ -34,29 +35,58 @@ class AuditLogger:
 
     @classmethod
     def redact_url(cls, url: str) -> str:
-        """Redact sensitive query parameter values from URL."""
+        """
+        Redact sensitive credentials, webhook tokens, user-info components,
+        and secret query parameter values from URL.
+        """
         if not url:
             return ""
         try:
             parsed = urlparse(url)
-            if not parsed.query:
-                return url
 
-            query_dict = parse_qs(parsed.query, keep_blank_values=True)
-            redacted_query = {}
-            for k, vals in query_dict.items():
-                if k.lower() in cls.REDACTED_PARAMS or any(p in k.lower() for p in ("token", "secret", "pass", "key")):
-                    redacted_query[k] = ["REDACTED"]
-                else:
-                    redacted_query[k] = vals
+            # 1. Redact embedded credentials (userinfo)
+            netloc = parsed.netloc
+            if "@" in netloc:
+                host_part = netloc.split("@")[-1]
+                netloc = f"[REDACTED]:[REDACTED]@{host_part}"
 
-            new_query = urlencode(redacted_query, doseq=True)
+            # 2. Redact sensitive path components (e.g. webhooks, bot tokens)
+            path = parsed.path
+            netloc_lower = (parsed.hostname or "").lower()
+            if "hooks.slack.com" in netloc_lower:
+                path = re.sub(r'(/services/T[^/]+/B[^/]+/)[^/]+', r'\1[REDACTED]', path)
+            elif "discord.com" in netloc_lower and "/api/webhooks/" in path:
+                path = re.sub(r'(/api/webhooks/\d+/)[^/]+', r'\1[REDACTED]', path)
+            elif "api.telegram.org" in netloc_lower and "/bot" in path:
+                path = re.sub(r'(/bot)[^/]+', r'\1[REDACTED]', path)
+
+            # 3. Redact query parameters
+            query = parsed.query
+            if query:
+                query_dict = parse_qs(query, keep_blank_values=True)
+                redacted_query = {}
+                for k, vals in query_dict.items():
+                    k_lower = k.lower().replace("-", "_")
+                    if (k_lower in cls.REDACTED_PARAMS or 
+                        any(p in k_lower for p in ("token", "secret", "pass", "key", "auth", "api_key", "apikey", "jwt", "circle_token", "access_token"))):
+                        redacted_query[k] = ["[REDACTED]"]
+                    else:
+                        redacted_query[k] = vals
+                query = urlencode(redacted_query, doseq=True).replace("%5BREDACTED%5D", "[REDACTED]")
+
             parts = list(parsed)
-            parts[4] = new_query
+            parts[1] = netloc
+            parts[2] = path
+            parts[4] = query
             return urlunparse(parts)
         except Exception:
             # Fallback regex redaction
-            return re.sub(r'([?&](?:token|key|api_key|secret|password)=)[^&]+', r'\1REDACTED', url, flags=re.I)
+            clean = re.sub(r'([?&](?:token|key|api_key|apiKey|secret|password|pass|circle-token|access_token)=)[^&]+', r'\1[REDACTED]', url, flags=re.I)
+            clean = re.sub(r'(hooks\.slack\.com/services/T[^/]+/B[^/]+/)[^/\s?#]+', r'\1[REDACTED]', clean)
+            clean = re.sub(r'(discord\.com/api/webhooks/\d+/)[^/\s?#]+', r'\1[REDACTED]', clean)
+            clean = re.sub(r'(api\.telegram\.org/bot)[^/\s?#]+', r'\1[REDACTED]', clean)
+            clean = re.sub(r'://[^:@/]+:[^:@/]+@', r'://[REDACTED]:[REDACTED]@', clean)
+            return clean
 
     def log_event(
         self,

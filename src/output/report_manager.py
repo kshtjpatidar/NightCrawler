@@ -16,6 +16,7 @@ from typing import Dict, Any, List, Optional
 
 from src.output.html_report import mask_secret, get_impact_info, HtmlReportGenerator, ReportConfig
 from src.core.program_profile import ProgramProfile
+from src.core.audit_logger import AuditLogger
 
 
 class FindingStatus:
@@ -100,6 +101,9 @@ class ReportManager:
                 lifecycle_status = FindingStatus.PATTERN_MATCHED
 
             masked_val = mask_secret(matched_val)
+            safe_url = AuditLogger.redact_url(url)
+            if matched_val and matched_val in safe_url:
+                safe_url = safe_url.replace(matched_val, masked_val)
             masked_ctx = context.replace(matched_val, masked_val) if (context and matched_val in context) else (context or "N/A")
 
             impact = get_impact_info(p_name)
@@ -108,7 +112,7 @@ class ReportManager:
 
             vulnerabilities.append({
                 "title": f"[{priority}] Potential {p_name} Exposure ({verification_label})",
-                "asset": url,
+                "asset": safe_url,
                 "category": "Sensitive Data Exposure > Exposed API Keys",
                 "severity": f"{priority} - {sev}",
                 "cvss_score": impact.get('cvss', '5.3'),
@@ -130,7 +134,7 @@ class ReportManager:
                     "notice": "Active validation verified via API" if is_keyhacks else "Active verification disabled per program safe harbor rules."
                 },
                 "evidence": {
-                    "source_url": url,
+                    "source_url": safe_url,
                     "line_number": line_num,
                     "masked_secret": masked_val,
                     "context": masked_ctx

@@ -64,6 +64,9 @@ class EffectivePolicy:
     validate_keys: bool
     requires_review: bool
     review_notes: List[str] = field(default_factory=list)
+    authorized_providers: Set[str] = field(default_factory=set)
+    allow_state_changing: bool = False
+    http_client: Optional[Any] = None
 
     @classmethod
     def build(
@@ -107,7 +110,7 @@ class EffectivePolicy:
             base_concurrency = profile.request_policy.concurrency
             base_timeout = profile.request_policy.timeout
             base_crawl_depth = profile.request_policy.crawl_depth
-            base_verify_tls = profile.request_policy.verify_tls
+            base_verify_tls = profile.request_policy.verify_tls if getattr(profile.request_policy, "verify_tls", None) is not None else True
             base_strict_scope = profile.request_policy.strict_scope
             base_scope_enabled = profile.scope.enabled
 
@@ -143,7 +146,7 @@ class EffectivePolicy:
             base_concurrency = cfg.concurrency
             base_timeout = cfg.timeout
             base_crawl_depth = cfg.depth
-            base_verify_tls = cfg.verify_tls
+            base_verify_tls = cfg.verify_tls if getattr(cfg, "verify_tls", None) is not None else True
             base_strict_scope = cfg.strict_scope
             base_scope_enabled = cfg.scope_enabled
 
@@ -233,11 +236,17 @@ class EffectivePolicy:
         if "verify_tls" in overrides and overrides["verify_tls"] is not None:
             effective_verify_tls = strict_bool(overrides["verify_tls"], "verify_tls")
         else:
-            effective_verify_tls = base_verify_tls
+            effective_verify_tls = base_verify_tls if base_verify_tls is not None else True
 
         # Safety Check: In strict compliance mode, reject insecure TLS configuration
         if effective_strict_scope and not effective_verify_tls:
             raise ValueError("Insecure TLS configuration is prohibited in strict compliance mode.")
+
+        # External Providers & Side Effects
+        auth_providers = set(overrides.get("authorized_providers") or [])
+        if profile and hasattr(profile, "authorized_providers") and profile.authorized_providers:
+            auth_providers.update(profile.authorized_providers)
+        allow_state_changing = bool(overrides.get("allow_state_changing", False))
 
         # Scope additions and narrowing
         if overrides.get("allowed_domains"):
@@ -375,7 +384,9 @@ class EffectivePolicy:
             reporter_email=reporter_email,
             validate_keys=effective_validate_keys,
             requires_review=requires_review,
-            review_notes=review_notes
+            review_notes=review_notes,
+            authorized_providers=auth_providers,
+            allow_state_changing=allow_state_changing
         )
 
     def is_uxcam_profile(self) -> bool:

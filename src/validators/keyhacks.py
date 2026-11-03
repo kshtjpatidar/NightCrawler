@@ -20,12 +20,15 @@ import asyncio
 import aiohttp
 import json
 import re
-from typing import Dict, Optional, Tuple, List, Any
+from typing import Dict, Optional, Tuple, List, Any, Set
 from dataclasses import dataclass
 from enum import Enum
+from urllib.parse import urlparse
 from rich.console import Console
 
-from src.core.http_client import _in_concurrency_scope
+from src.core.http_client import _in_concurrency_scope, PolicyAwareResolver
+from src.core.audit_logger import AuditLogger
+from src.output.html_report import mask_secret
 
 console = Console()
 
@@ -33,6 +36,14 @@ console = Console()
 class KeyHacksPolicyError(ValueError):
     """Raised when mandatory policy dependencies are missing or violated in KeyHacksValidator."""
     pass
+
+
+class ValidationSideEffect(str, Enum):
+    """Classification of validator side effects."""
+    READ_ONLY = "read_only"
+    STATE_CHANGING = "state_changing"
+    DESTRUCTIVE = "destructive"
+    UNKNOWN = "unknown"
 
 
 class ValidationStatus(Enum):
@@ -72,7 +83,9 @@ KEYHACKS_VALIDATORS = {
         "failure_indicators": ["InvalidClientTokenId", "SignatureDoesNotMatch"],
         "requires_pair": True,
         "pair_pattern": "AWS Secret Key",
-        "description": "Validates AWS credentials by calling STS GetCallerIdentity"
+        "description": "Validates AWS credentials by calling STS GetCallerIdentity",
+        "side_effect": ValidationSideEffect.READ_ONLY,
+        "provider": "aws"
     },
     
     "Google API Key": {
@@ -86,7 +99,9 @@ KEYHACKS_VALIDATORS = {
             "success_indicators": ["results", "status"],
             "failure_indicators": ["REQUEST_DENIED", "InvalidKeyMapError"]
         },
-        "description": "Validates Google API key using OAuth tokeninfo or Maps API"
+        "description": "Validates Google API key using OAuth tokeninfo or Maps API",
+        "side_effect": ValidationSideEffect.READ_ONLY,
+        "provider": "google"
     },
     
     "Firebase Key": {
@@ -97,7 +112,9 @@ KEYHACKS_VALIDATORS = {
         "body": "{}",
         "success_indicators": ["idToken", "refreshToken", "kind"],
         "failure_indicators": ["API_KEY_INVALID", "INVALID_API_KEY"],
-        "description": "Validates Firebase API key by attempting anonymous signup"
+        "description": "Validates Firebase API key by attempting anonymous signup",
+        "side_effect": ValidationSideEffect.STATE_CHANGING,
+        "provider": "firebase"
     },
     
     # ==========================================
@@ -113,7 +130,9 @@ KEYHACKS_VALIDATORS = {
         "auth_pass": "",
         "success_indicators": ["data", "object", "has_more"],
         "failure_indicators": ["Invalid API Key", "api_key_expired"],
-        "description": "Validates Stripe key by listing charges"
+        "description": "Validates Stripe key by listing charges",
+        "side_effect": ValidationSideEffect.READ_ONLY,
+        "provider": "stripe"
     },
     
     "Stripe Test Secret Key": {
@@ -125,7 +144,9 @@ KEYHACKS_VALIDATORS = {
         "auth_pass": "",
         "success_indicators": ["data", "object"],
         "failure_indicators": ["Invalid API Key"],
-        "description": "Validates Stripe test key (less critical but still validates)"
+        "description": "Validates Stripe test key (less critical but still validates)",
+        "side_effect": ValidationSideEffect.READ_ONLY,
+        "provider": "stripe"
     },
     
     "PayPal Braintree Token": {
@@ -177,7 +198,9 @@ KEYHACKS_VALIDATORS = {
             "headers": {"Authorization": "Bearer {key}"},
             "scope_header": "X-OAuth-Scopes"
         },
-        "description": "Validates GitHub token and checks scopes"
+        "description": "Validates GitHub token and checks scopes",
+        "side_effect": ValidationSideEffect.READ_ONLY,
+        "provider": "github"
     },
     
     "GitHub Personal Access Token": {
@@ -187,7 +210,9 @@ KEYHACKS_VALIDATORS = {
         "headers": {"Authorization": "token {key}"},
         "success_indicators": ["login", "id"],
         "failure_indicators": ["Bad credentials"],
-        "description": "Validates GitHub classic PAT"
+        "description": "Validates GitHub classic PAT",
+        "side_effect": ValidationSideEffect.READ_ONLY,
+        "provider": "github"
     },
     
     "GitLab PAT": {
@@ -197,7 +222,9 @@ KEYHACKS_VALIDATORS = {
         "headers": {"PRIVATE-TOKEN": "{key}"},
         "success_indicators": ["id", "username", "email"],
         "failure_indicators": ["401 Unauthorized"],
-        "description": "Validates GitLab personal access token"
+        "description": "Validates GitLab personal access token",
+        "side_effect": ValidationSideEffect.READ_ONLY,
+        "provider": "gitlab"
     },
     
     "CircleCI Access Token": {
@@ -206,7 +233,9 @@ KEYHACKS_VALIDATORS = {
         "url": "https://circleci.com/api/v1.1/me?circle-token={key}",
         "success_indicators": ["name", "login", "id"],
         "failure_indicators": ["Permission denied", "Must provide API token"],
-        "description": "Validates CircleCI API token"
+        "description": "Validates CircleCI API token",
+        "side_effect": ValidationSideEffect.READ_ONLY,
+        "provider": "circleci"
     },
     
     "Travis CI API Token": {
@@ -240,7 +269,9 @@ KEYHACKS_VALIDATORS = {
         "headers": {"Authorization": "Bearer {key}", "Content-Type": "application/json"},
         "success_indicators": ["ok", "user", "team"],
         "failure_indicators": ["invalid_auth", "not_authed"],
-        "description": "Validates Slack bot token"
+        "description": "Validates Slack bot token",
+        "side_effect": ValidationSideEffect.READ_ONLY,
+        "provider": "slack"
     },
     
     "Slack User Token": {
@@ -250,7 +281,9 @@ KEYHACKS_VALIDATORS = {
         "data": {"token": "{key}"},
         "success_indicators": ["ok", "user_id"],
         "failure_indicators": ["invalid_auth"],
-        "description": "Validates Slack user token (xoxp)"
+        "description": "Validates Slack user token (xoxp)",
+        "side_effect": ValidationSideEffect.READ_ONLY,
+        "provider": "slack"
     },
     
     "Slack Webhook": {
@@ -261,7 +294,9 @@ KEYHACKS_VALIDATORS = {
         "body": '{"text":""}',
         "success_indicators": ["missing_text_or_fallback_or_attachments"],
         "failure_indicators": ["invalid_payload", "channel_not_found", "Webhook URL"],
-        "description": "Validates Slack webhook by sending empty message"
+        "description": "Validates Slack webhook by sending empty message",
+        "side_effect": ValidationSideEffect.STATE_CHANGING,
+        "provider": "slack"
     },
     
     "Discord Webhook": {
@@ -270,7 +305,9 @@ KEYHACKS_VALIDATORS = {
         "url": "{key}",
         "success_indicators": ["id", "token", "name", "channel_id"],
         "failure_indicators": ["Unknown Webhook", "Invalid Webhook Token"],
-        "description": "Validates Discord webhook by GET request"
+        "description": "Validates Discord webhook by GET request",
+        "side_effect": ValidationSideEffect.READ_ONLY,
+        "provider": "discord"
     },
     
     "Discord Bot Token": {
@@ -280,7 +317,9 @@ KEYHACKS_VALIDATORS = {
         "headers": {"Authorization": "Bot {key}"},
         "success_indicators": ["id", "username", "discriminator"],
         "failure_indicators": ["401: Unauthorized", "Invalid Token"],
-        "description": "Validates Discord bot token"
+        "description": "Validates Discord bot token",
+        "side_effect": ValidationSideEffect.READ_ONLY,
+        "provider": "discord"
     },
     
     "Telegram Bot Token": {
@@ -289,7 +328,9 @@ KEYHACKS_VALIDATORS = {
         "url": "https://api.telegram.org/bot{key}/getMe",
         "success_indicators": ["ok", "result", "username"],
         "failure_indicators": ["Not Found", "Unauthorized"],
-        "description": "Validates Telegram bot token"
+        "description": "Validates Telegram bot token",
+        "side_effect": ValidationSideEffect.READ_ONLY,
+        "provider": "telegram"
     },
     
     "Twilio Account SID": {
@@ -303,7 +344,9 @@ KEYHACKS_VALIDATORS = {
         "pair_pattern": "Twilio Auth Token",
         "success_indicators": ["account_sid", "status", "friendly_name"],
         "failure_indicators": ["Authenticate", "invalid username"],
-        "description": "Validates Twilio Account SID and Auth Token"
+        "description": "Validates Twilio Account SID and Auth Token",
+        "side_effect": ValidationSideEffect.READ_ONLY,
+        "provider": "twilio"
     },
     
     # ==========================================
@@ -692,7 +735,9 @@ KEYHACKS_VALIDATORS = {
         "body": '{"model":"claude-3-sonnet-20240229","max_tokens":1,"messages":[{"role":"user","content":"hi"}]}',
         "success_indicators": ["content", "model", "id"],
         "failure_indicators": ["invalid_api_key", "authentication_error"],
-        "description": "Validates Anthropic/Claude API key"
+        "description": "Validates Anthropic/Claude API key",
+        "side_effect": ValidationSideEffect.STATE_CHANGING,
+        "provider": "anthropic"
     },
     
     "Supabase API Key": {
@@ -802,7 +847,9 @@ KEYHACKS_VALIDATORS = {
         "headers": {"Content-Type": "application/json"},
         "success_indicators": ["success"],
         "failure_indicators": ["Invalid write key", "Unauthorized"],
-        "description": "Validates Segment write key"
+        "description": "Validates Segment write key",
+        "side_effect": ValidationSideEffect.STATE_CHANGING,
+        "provider": "segment"
     },
     
     "LaunchDarkly API Key": {
@@ -981,9 +1028,11 @@ class KeyHacksValidator:
         request_policy_manager: Optional[Any] = None,
         scope_manager: Optional[Any] = None,
         timeout: int = 10,
-        verify_ssl: bool = False
+        verify_ssl: bool = True,
+        allow_state_changing: bool = False,
+        authorized_providers: Optional[Set[str]] = None
     ):
-        # Support legacy positional signatures, e.g. KeyHacksValidator(timeout=10, verify_ssl=False)
+        # Support legacy positional signatures, e.g. KeyHacksValidator(timeout=10, verify_ssl=True)
         if isinstance(effective_policy, (int, float)):
             timeout = int(effective_policy)
             effective_policy = None
@@ -993,34 +1042,199 @@ class KeyHacksValidator:
             self.scope_manager = scope_manager or getattr(effective_policy, "scope_manager", None)
             self.request_policy_manager = request_policy_manager or getattr(effective_policy, "request_policy_manager", None)
             self.http_client = http_client or getattr(effective_policy, "http_client", None)
-            self.verify_ssl = getattr(effective_policy, "verify_tls", verify_ssl)
+            policy_tls = getattr(effective_policy, "verify_tls", None)
+            self.verify_ssl = policy_tls if policy_tls is not None else verify_ssl
+            policy_providers = getattr(effective_policy, "authorized_providers", None)
+            self.authorized_providers = set(authorized_providers) if authorized_providers is not None else (set(policy_providers) if policy_providers else set())
+            policy_state_changing = getattr(effective_policy, "allow_state_changing", False)
+            self.allow_state_changing = allow_state_changing or policy_state_changing
         else:
             self.effective_policy = None
             self.scope_manager = scope_manager
             self.request_policy_manager = request_policy_manager
             self.http_client = http_client
             self.verify_ssl = verify_ssl
+            self.allow_state_changing = allow_state_changing
+            self.authorized_providers = set(authorized_providers) if authorized_providers is not None else set()
 
         self.timeout = aiohttp.ClientTimeout(total=timeout)
         self.validated_count = 0
         self.valid_secrets = []
 
     @classmethod
-    def from_policy(cls, effective_policy: Any, timeout: int = 10) -> "KeyHacksValidator":
+    def from_policy(
+        cls,
+        effective_policy: Any,
+        timeout: int = 10,
+        allow_state_changing: bool = False,
+        authorized_providers: Optional[Set[str]] = None
+    ) -> "KeyHacksValidator":
         """Construct a KeyHacksValidator wired with all mandatory policy dependencies from an EffectivePolicy."""
+        policy_tls = getattr(effective_policy, "verify_tls", None)
+        verify_ssl = policy_tls if policy_tls is not None else True
+        policy_state_changing = getattr(effective_policy, "allow_state_changing", False)
+        policy_providers = getattr(effective_policy, "authorized_providers", None)
+        providers = set(authorized_providers) if authorized_providers is not None else (set(policy_providers) if policy_providers else set())
+        
+        http_client = getattr(effective_policy, "http_client", None)
+        if http_client is None:
+            from src.core.http_client import NightCrawlerHttpClient
+            http_client = NightCrawlerHttpClient(effective_policy=effective_policy)
+            effective_policy.http_client = http_client
+
         return cls(
             effective_policy=effective_policy,
-            http_client=getattr(effective_policy, "http_client", None),
+            http_client=http_client,
             request_policy_manager=getattr(effective_policy, "request_policy_manager", None),
             scope_manager=getattr(effective_policy, "scope_manager", None),
             timeout=timeout,
-            verify_ssl=getattr(effective_policy, "verify_tls", False)
+            verify_ssl=verify_ssl,
+            allow_state_changing=allow_state_changing or policy_state_changing,
+            authorized_providers=providers
         )
 
-    def validate_policy_dependencies(self) -> None:
+    @classmethod
+    def redact_url(cls, url: str, secret: Optional[str] = None) -> str:
+        """Redact query credentials, webhook paths, and embedded secrets in URLs."""
+        clean = AuditLogger.redact_url(url)
+        if secret and secret in clean:
+            clean = clean.replace(secret, "[REDACTED]")
+        return clean
+
+    @classmethod
+    def redact_text(cls, text: Optional[str], secret: Optional[str] = None) -> str:
+        """Scrub secret credentials, tokens, and authorization headers from text."""
+        if not text:
+            return ""
+        clean = str(text)
+        if secret and secret in clean:
+            clean = clean.replace(secret, "[REDACTED]")
+
+        # Redact bearer tokens and authorization headers
+        clean = re.sub(r'(?i)(bearer\s+)[A-Za-z0-9_\-\.]{8,}', r'\1[REDACTED]', clean)
+        clean = re.sub(r'(?i)(token\s+)[A-Za-z0-9_\-\.]{8,}', r'\1[REDACTED]', clean)
+        clean = re.sub(r'(?i)(bot\s+)[A-Za-z0-9_\-\.]{8,}', r'\1[REDACTED]', clean)
+        clean = re.sub(r'(?i)(Basic\s+)[A-Za-z0-9+/=]{8,}', r'\1[REDACTED]', clean)
+
+        # Redact common query string secrets
+        clean = re.sub(r'([?&](?:access_token|key|api_key|apiKey|secret|password|circle-token)=)[^&\s\'"]+', r'\1[REDACTED]', clean, flags=re.I)
+
+        # Redact webhook path tokens
+        clean = re.sub(r'(hooks\.slack\.com/services/T[^/]+/B[^/]+/)[^/\s?#\'"]+', r'\1[REDACTED]', clean)
+        clean = re.sub(r'(discord\.com/api/webhooks/\d+/)[^/\s?#\'"]+', r'\1[REDACTED]', clean)
+        clean = re.sub(r'(api\.telegram\.org/bot)[^/\s?#\'"]+', r'\1[REDACTED]', clean)
+
+        return clean
+
+    @classmethod
+    def build_sanitized_command(
+        cls,
+        validator: Dict,
+        secret: str,
+        extra_params: Optional[Dict] = None,
+        url: Optional[str] = None,
+        method: Optional[str] = None
+    ) -> str:
         """
-        Validate all mandatory policy dependencies are present and valid before network activity.
-        Fails closed with KeyHacksPolicyError if any dependency is missing or misconfigured.
+        Build a sanitized reproducible validation command (e.g. curl or CLI)
+        with all secret tokens, API keys, passwords, and webhook paths strictly redacted.
+        """
+        v_type = validator.get("type", "http")
+        if v_type == "command":
+            raw_cmd = validator.get("command", "")
+            cmd_safe = raw_cmd.replace("{key}", "[REDACTED]").replace("{secret}", "[REDACTED]")
+            if extra_params:
+                safe_params = {k: ("[REDACTED]" if any(s in k.lower() for s in ("key", "secret", "token", "pass")) else v) for k, v in extra_params.items()}
+                try:
+                    cmd_safe = cmd_safe.format(**safe_params)
+                except Exception:
+                    pass
+            return cls.redact_text(cmd_safe, secret)
+
+        # HTTP curl command
+        req_method = (method or validator.get("method", "GET")).upper()
+        if not url:
+            raw_url = validator.get("url", "")
+            try:
+                url = raw_url.format(key=secret, **(extra_params or {}))
+            except Exception:
+                url = raw_url
+
+        clean_url = cls.redact_url(url, secret)
+        parts = ["curl", f"-X {req_method}"]
+
+        # Headers
+        if "headers" in validator:
+            for h_k, h_v in validator["headers"].items():
+                h_k_lower = h_k.lower()
+                if h_k_lower in ("authorization", "proxy-authorization", "private-token", "api-key", "x-api-key") or any(s in h_k_lower for s in ("token", "secret", "key", "auth")):
+                    if "bearer " in h_v.lower():
+                        val_sanitized = "Bearer [REDACTED]"
+                    elif "token " in h_v.lower():
+                        val_sanitized = "token [REDACTED]"
+                    elif "bot " in h_v.lower():
+                        val_sanitized = "Bot [REDACTED]"
+                    else:
+                        val_sanitized = "[REDACTED]"
+                else:
+                    try:
+                        val_sanitized = h_v.format(key=secret, **(extra_params or {}))
+                    except Exception:
+                        val_sanitized = h_v
+                    val_sanitized = cls.redact_text(val_sanitized, secret)
+                parts.append(f"-H '{h_k}: {val_sanitized}'")
+
+        # Basic Auth
+        if validator.get("auth") == "basic":
+            parts.append("-u '[REDACTED]:[REDACTED]'")
+
+        # Body / Data
+        if "body" in validator:
+            raw_body = validator["body"]
+            body_clean = raw_body.replace("{key}", "[REDACTED]").replace("{secret}", "[REDACTED]")
+            body_clean = cls.redact_text(body_clean, secret)
+            parts.append(f"-d '{body_clean}'")
+        elif "data" in validator:
+            parts.append("-d '[REDACTED]'")
+
+        parts.append(f"'{clean_url}'")
+        cmd_str = " ".join(parts)
+        return cls.redact_text(cmd_str, secret)
+
+    @classmethod
+    def extract_provider_from_url(cls, url: str) -> str:
+        """Infer provider identifier from destination host."""
+        if not url:
+            return "unknown"
+        parsed = urlparse(url)
+        host = (parsed.hostname or "").lower()
+        parts = host.split(".")
+        if len(parts) >= 2:
+            return parts[-2]
+        return host or "unknown"
+
+    def is_provider_authorized(self, validator: Dict, url: str) -> bool:
+        """Verify if external third-party provider is explicitly authorized."""
+        if not self.authorized_providers:
+            return False
+        if "*" in self.authorized_providers or "all" in self.authorized_providers:
+            return True
+        provider = (validator.get("provider") or self.extract_provider_from_url(url)).lower()
+        if provider in self.authorized_providers:
+            return True
+        parsed = urlparse(url)
+        host = (parsed.hostname or "").lower()
+        for p in self.authorized_providers:
+            p_clean = p.lower().lstrip(".*")
+            if p_clean and (host == p_clean or host.endswith("." + p_clean) or p_clean in host):
+                return True
+        return False
+
+    def validate_policy_dependencies(self, connector: Optional[aiohttp.TCPConnector] = None) -> None:
+        """
+        Validate all mandatory policy dependencies are present, identical to EffectivePolicy,
+        and configured strictly before any network activity.
+        Fails closed with KeyHacksPolicyError if any dependency is missing, mismatched, or violated.
         """
         if self.scope_manager is None:
             raise KeyHacksPolicyError("ScopeManager is missing: active HTTP validation requires an authorized ScopeManager.")
@@ -1028,10 +1242,46 @@ class KeyHacksValidator:
             raise KeyHacksPolicyError("RequestPolicyManager is missing: active HTTP validation requires a RequestPolicyManager.")
         if self.http_client is None:
             raise KeyHacksPolicyError("HttpClient is missing: active HTTP validation requires NightCrawlerHttpClient.")
-        if not hasattr(self.http_client, "get_resolver") or self.http_client.get_resolver() is None:
+
+        resolver = self.http_client.get_resolver() if hasattr(self.http_client, "get_resolver") else None
+        if resolver is None:
             raise KeyHacksPolicyError("DNS Resolver is missing: active HTTP validation requires a PolicyAwareResolver.")
         if not hasattr(self.request_policy_manager, "global_limiter") or self.request_policy_manager.global_limiter is None:
             raise KeyHacksPolicyError("RateLimiter is missing: active HTTP validation requires a GlobalRateLimiter.")
+
+        # Strict identity enforcement against EffectivePolicy
+        if self.effective_policy is not None:
+            if self.scope_manager is not self.effective_policy.scope_manager:
+                raise KeyHacksPolicyError("Mismatched ScopeManager: KeyHacksValidator ScopeManager is not identical to EffectivePolicy.scope_manager")
+            if self.request_policy_manager is not self.effective_policy.request_policy_manager:
+                raise KeyHacksPolicyError("Mismatched RequestPolicyManager: KeyHacksValidator RequestPolicyManager is not identical to EffectivePolicy.request_policy_manager")
+            if hasattr(self.effective_policy, "http_client") and self.effective_policy.http_client is not None and self.http_client is not self.effective_policy.http_client:
+                raise KeyHacksPolicyError("Mismatched HttpClient: KeyHacksValidator HttpClient is not identical to EffectivePolicy.http_client")
+
+        # Strict identity enforcement between HttpClient and managers
+        if self.http_client.scope_manager is not self.scope_manager:
+            raise KeyHacksPolicyError("Mismatched ScopeManager: HttpClient ScopeManager is not identical to KeyHacksValidator ScopeManager")
+        if self.http_client.rate_limiter is not self.request_policy_manager.global_limiter:
+            raise KeyHacksPolicyError("Mismatched RateLimiter: HttpClient rate_limiter is not identical to RequestPolicyManager.global_limiter")
+        if not isinstance(resolver, PolicyAwareResolver) or getattr(resolver, "http_client", None) is not self.http_client:
+            raise KeyHacksPolicyError("Mismatched Resolver: Resolver is not an authorized PolicyAwareResolver bound to this HttpClient")
+
+        # Connector Resolver validation
+        if connector is not None:
+            from unittest.mock import Mock
+            conn_resolver = getattr(connector, "_resolver", None)
+            if not isinstance(connector, Mock) and not isinstance(conn_resolver, Mock):
+                if conn_resolver is not resolver:
+                    raise KeyHacksPolicyError("Mismatched Connector Resolver: TCPConnector does not use the authorized PolicyAwareResolver")
+            elif hasattr(connector, "_resolver") and conn_resolver is not resolver and not isinstance(conn_resolver, Mock):
+                raise KeyHacksPolicyError("Mismatched Connector Resolver: TCPConnector does not use the authorized PolicyAwareResolver")
+
+        # TLS Configuration verification
+        if not self.verify_ssl:
+            if self.effective_policy and getattr(self.effective_policy, "strict_scope", True):
+                raise KeyHacksPolicyError("Insecure TLS verification is prohibited under strict policy compliance")
+        if hasattr(self.http_client, "verify_tls") and self.http_client.verify_tls != self.verify_ssl:
+            raise KeyHacksPolicyError("Conflicting TLS configuration between HttpClient and KeyHacksValidator")
 
     def print_disclaimer(self):
         """Print ethical use disclaimer"""
@@ -1052,20 +1302,34 @@ class KeyHacksValidator:
     
     async def validate_http(self, validator: Dict, secret: str, extra_params: Dict = None) -> ValidationResult:
         """Validate secret using HTTP request under shared concurrency, scope, DNS, and rate-limiting policy"""
-        # Phase 2: Fail-closed dependency validation before any network activity
-        self.validate_policy_dependencies()
-
         try:
             url = validator["url"].format(key=secret, **(extra_params or {}))
             method = validator.get("method", "GET").upper()
+            sanitized_cmd = self.build_sanitized_command(validator, secret, extra_params, url, method)
 
-            # Phase 3.A: Scope enforcement on target URL
-            if not self.scope_manager.is_url_in_scope(url):
+            # Check side effects before touching network or dependency validation
+            side_effect = validator.get("side_effect", ValidationSideEffect.READ_ONLY)
+            side_effect_str = side_effect.value if isinstance(side_effect, ValidationSideEffect) else str(side_effect).lower()
+            if side_effect_str in ("state_changing", "destructive") and not self.allow_state_changing:
                 return ValidationResult(
-                    status=ValidationStatus.ERROR,
-                    message="Target validation URL is out of scope",
-                    validation_command=f"curl -X {method} '{url}'"
+                    status=ValidationStatus.UNKNOWN,
+                    message=f"State-changing validation for '{validator.get('description', 'secret')}' is disabled by default. Requires explicit authorization.",
+                    validation_command=sanitized_cmd
                 )
+
+            # Phase 2: Fail-closed dependency validation before any network activity
+            self.validate_policy_dependencies()
+
+            # Phase 3.A: Scope & External Provider authorization check
+            is_in_scope = self.scope_manager.is_url_in_scope(url)
+            provider = validator.get("provider") or self.extract_provider_from_url(url)
+            if not is_in_scope:
+                if not self.is_provider_authorized(validator, url):
+                    return ValidationResult(
+                        status=ValidationStatus.ERROR,
+                        message=f"Target validation URL is out of scope (external provider '{provider}' is not authorized)",
+                        validation_command=sanitized_cmd
+                    )
 
             # Phase 3.C: Shared Concurrency Semaphore enforcement
             sem = self.request_policy_manager.get_semaphore()
@@ -1073,25 +1337,26 @@ class KeyHacksValidator:
                 async with sem:
                     token = _in_concurrency_scope.set(True)
                     try:
-                        return await self._do_validate_http(validator, secret, extra_params, url, method)
+                        return await self._do_validate_http(validator, secret, extra_params, url, method, sanitized_cmd=sanitized_cmd, provider=provider)
                     finally:
                         _in_concurrency_scope.reset(token)
             else:
-                return await self._do_validate_http(validator, secret, extra_params, url, method)
+                return await self._do_validate_http(validator, secret, extra_params, url, method, sanitized_cmd=sanitized_cmd, provider=provider)
 
         except asyncio.TimeoutError:
             return ValidationResult(
                 status=ValidationStatus.UNKNOWN,
                 message="Request timed out",
-                validation_command=f"curl -X {method} '{url}'" if 'url' in locals() and 'method' in locals() else None
+                validation_command=sanitized_cmd if 'sanitized_cmd' in locals() else None
             )
         except KeyHacksPolicyError:
             raise
         except Exception as e:
+            safe_err = self.redact_text(str(e), secret)
             return ValidationResult(
                 status=ValidationStatus.ERROR,
-                message=f"Validation error: {str(e)[:100]}",
-                validation_command=f"curl -X {method} '{url}'" if 'url' in locals() and 'method' in locals() else None
+                message=f"Validation error: {safe_err[:100]}",
+                validation_command=sanitized_cmd if 'sanitized_cmd' in locals() else None
             )
 
     async def _do_validate_http(
@@ -1100,8 +1365,11 @@ class KeyHacksValidator:
         secret: str,
         extra_params: Optional[Dict],
         url: str,
-        method: str
+        method: str,
+        sanitized_cmd: Optional[str] = None,
+        provider: Optional[str] = None
     ) -> ValidationResult:
+        cmd = sanitized_cmd or self.build_sanitized_command(validator, secret, extra_params, url, method)
         headers = {}
         
         # Build headers
@@ -1119,7 +1387,14 @@ class KeyHacksValidator:
         # Build body
         body = None
         if "body" in validator:
-            body = validator["body"].format(key=secret, **(extra_params or {}))
+            raw_body = validator["body"]
+            try:
+                body = raw_body.format(key=secret, **(extra_params or {}))
+            except (IndexError, KeyError, ValueError):
+                body = raw_body.replace("{key}", secret)
+                if extra_params:
+                    for ep_k, ep_v in extra_params.items():
+                        body = body.replace(f"{{{ep_k}}}", str(ep_v))
         
         # Build data
         data = None
@@ -1129,8 +1404,10 @@ class KeyHacksValidator:
         payload = body or data
 
         # Always construct session using policy-aware resolver to pin validated DNS answers & enforce IP safety
+        # and unified SSL settings to prevent connector-vs-request conflicts
         resolver = self.http_client.get_resolver()
-        connector = aiohttp.TCPConnector(resolver=resolver, ssl=self.verify_ssl)
+        connector = aiohttp.TCPConnector(resolver=resolver, ssl=self.http_client.ssl_context)
+        self.validate_policy_dependencies(connector=connector)
 
         async with aiohttp.ClientSession(connector=connector, timeout=self.timeout) as session:
             status, content, final_url = await self.http_client.request(
@@ -1139,28 +1416,39 @@ class KeyHacksValidator:
                 url=url,
                 extra_headers=headers,
                 data=payload,
-                auth=auth
+                auth=auth,
+                authorized_provider=provider
             )
 
         if status is None:
             return ValidationResult(
                 status=ValidationStatus.ERROR,
                 message="HTTP request blocked by policy or network safety controls",
-                validation_command=f"curl -X {method} '{url}'"
+                validation_command=cmd
             )
 
         if status in (301, 302, 303, 307, 308) and not content:
             return ValidationResult(
                 status=ValidationStatus.ERROR,
                 message="Redirect was blocked by scope or security policy",
-                validation_command=f"curl -X {method} '{url}'"
+                validation_command=cmd
             )
 
-        return self._analyze_response(validator, content or "", status, final_url or url)
+        return self._analyze_response(validator, content or "", status, final_url or url, secret=secret, sanitized_cmd=cmd)
     
-    def _analyze_response(self, validator: Dict, response: str, status_code: int, url: str) -> ValidationResult:
-        """Analyze HTTP response to determine validity"""
+    def _analyze_response(
+        self,
+        validator: Dict,
+        response: str,
+        status_code: int,
+        url: str,
+        secret: Optional[str] = None,
+        sanitized_cmd: Optional[str] = None
+    ) -> ValidationResult:
+        """Analyze HTTP response to determine validity with strict secret redaction."""
         response_lower = response.lower()
+        cmd = sanitized_cmd or self.build_sanitized_command(validator, secret or "", url=url)
+        clean_resp = self.redact_text(response[:500], secret) if response else None
         
         # Check for success indicators
         success_count = 0
@@ -1179,34 +1467,36 @@ class KeyHacksValidator:
             return ValidationResult(
                 status=ValidationStatus.INVALID,
                 message=f"Key appears to be invalid (HTTP {status_code})",
-                raw_response=response[:500],
-                validation_command=f"Manual: curl '{url}'"
+                raw_response=clean_resp,
+                validation_command=cmd
             )
         elif success_count >= 2 or (success_count > 0 and status_code == 200):
             return ValidationResult(
                 status=ValidationStatus.VALID,
                 message=f"✅ KEY IS VALID! (HTTP {status_code}, {success_count} success indicators)",
-                raw_response=response[:500],
-                validation_command=f"curl '{url}'"
+                raw_response=clean_resp,
+                validation_command=cmd
             )
         elif status_code == 429:
             return ValidationResult(
                 status=ValidationStatus.RATE_LIMITED,
                 message="Rate limited - try manual validation",
-                validation_command=f"curl '{url}'"
+                raw_response=clean_resp,
+                validation_command=cmd
             )
         elif status_code in [401, 403]:
             return ValidationResult(
                 status=ValidationStatus.INVALID,
                 message=f"Authentication failed (HTTP {status_code})",
-                validation_command=f"curl '{url}'"
+                raw_response=clean_resp,
+                validation_command=cmd
             )
         else:
             return ValidationResult(
                 status=ValidationStatus.UNKNOWN,
                 message=f"Unclear result (HTTP {status_code}) - verify manually",
-                raw_response=response[:300],
-                validation_command=f"curl '{url}'"
+                raw_response=clean_resp,
+                validation_command=cmd
             )
     
     async def validate_secret(self, pattern_name: str, secret_value: str, extra_params: Dict = None) -> ValidationResult:
@@ -1233,10 +1523,11 @@ class KeyHacksValidator:
         # Check if requires pair (like AWS key + secret)
         if validator.get("requires_pair"):
             if not extra_params or "secret" not in extra_params:
+                sanitized_cmd = self.build_sanitized_command(validator, secret_value, extra_params)
                 return ValidationResult(
                     status=ValidationStatus.UNKNOWN,
                     message=f"Requires paired secret ({validator.get('pair_pattern', 'secret')}). Cannot validate alone.",
-                    validation_command=validator.get("description", "Manual validation required")
+                    validation_command=sanitized_cmd
                 )
         
         # Validate based on type
@@ -1244,16 +1535,18 @@ class KeyHacksValidator:
             try:
                 result = await self.validate_http(validator, secret_value, extra_params)
             except KeyHacksPolicyError as pe:
+                sanitized_cmd = self.build_sanitized_command(validator, secret_value, extra_params)
                 result = ValidationResult(
                     status=ValidationStatus.ERROR,
                     message=f"Policy dependency missing: {pe}",
-                    validation_command=validator.get("description", "Manual validation required")
+                    validation_command=sanitized_cmd
                 )
         elif validator.get("type") == "command":
+            sanitized_cmd = self.build_sanitized_command(validator, secret_value, extra_params)
             result = ValidationResult(
                 status=ValidationStatus.UNKNOWN,
                 message="Command-based validation not auto-run for safety. Use manual command.",
-                validation_command=validator["command"].format(key=secret_value, **(extra_params or {}))
+                validation_command=sanitized_cmd
             )
         else:
             result = ValidationResult(
@@ -1266,8 +1559,8 @@ class KeyHacksValidator:
             self.validated_count += 1
             self.valid_secrets.append({
                 "pattern": pattern_name,
-                "value": secret_value[:20] + "...",
-                "message": result.message
+                "value": mask_secret(secret_value),
+                "message": self.redact_text(result.message, secret_value)
             })
         
         return result

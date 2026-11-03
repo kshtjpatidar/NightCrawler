@@ -14,7 +14,7 @@ import logging
 import ssl
 import socket
 import ipaddress
-from typing import Optional, Dict, Tuple, Any, List
+from typing import Optional, Dict, Tuple, Any, List, Set
 from urllib.parse import urljoin, urlparse
 import aiohttp
 import aiohttp.abc
@@ -23,6 +23,7 @@ import aiohttp.resolver
 from src.core.scope import ScopeManager
 from src.core.rate_limiter import GlobalRateLimiter
 from src.core.header_manager import HeaderManager
+from src.core.audit_logger import AuditLogger
 
 logger = logging.getLogger("nightcrawler.http")
 
@@ -98,7 +99,8 @@ class NightCrawlerHttpClient:
         request_policy_manager: Optional[Any] = None,
         auth_manager: Optional[Any] = None,
         audit_logger: Optional[Any] = None,
-        effective_policy: Optional[Any] = None
+        effective_policy: Optional[Any] = None,
+        authorized_providers: Optional[Set[str]] = None
     ):
         # Support passing an EffectivePolicy as the first argument or explicitly
         if hasattr(scope_manager, "request_policy_manager") and hasattr(scope_manager, "scope_manager"):
@@ -118,6 +120,9 @@ class NightCrawlerHttpClient:
             self.strict_mode = effective_policy.strict_scope
             self.max_redirects = max_redirects
             self.max_retries = max_retries
+            self.authorized_providers = set(getattr(effective_policy, "authorized_providers", set()))
+            if authorized_providers:
+                self.authorized_providers.update(authorized_providers)
         else:
             self.effective_policy = None
             self.scope_manager = scope_manager
@@ -137,6 +142,7 @@ class NightCrawlerHttpClient:
             self.strict_mode = strict_mode
             self.max_redirects = max_redirects
             self.max_retries = max_retries
+            self.authorized_providers = set(authorized_providers) if authorized_providers is not None else None
 
         if self.strict_mode and not self.verify_tls:
             raise ValueError("Insecure TLS configuration is prohibited in strict compliance mode.")
@@ -150,9 +156,34 @@ class NightCrawlerHttpClient:
         # DNS Pinning cache: maps validated host -> list of authorized IP strings
         self._pinned_ips: Dict[str, List[str]] = {}
 
+        # Policy-aware DNS Resolver instance
+        self._resolver = PolicyAwareResolver(self)
+
+    def is_provider_authorized(self, provider: str, url: str) -> bool:
+        """Check if an external provider or URL is authorized for this client."""
+        if not provider:
+            return False
+        if self.authorized_providers is None:
+            # When client does not restrict providers, honor caller-authorized provider
+            return True
+        if "*" in self.authorized_providers or "all" in self.authorized_providers:
+            return True
+        p_lower = provider.lower()
+        if p_lower in self.authorized_providers:
+            return True
+        parsed = urlparse(url)
+        host = (parsed.hostname or "").lower()
+        for ap in self.authorized_providers:
+            ap_clean = ap.lower().lstrip(".*")
+            if ap_clean and (host == ap_clean or host.endswith("." + ap_clean) or ap_clean in host):
+                return True
+        return False
+
     def get_resolver(self) -> aiohttp.abc.AbstractResolver:
         """Return a policy-aware DNS resolver that enforces policy validation and DNS pinning."""
-        return PolicyAwareResolver(self)
+        if not hasattr(self, "_resolver") or self._resolver is None:
+            self._resolver = PolicyAwareResolver(self)
+        return self._resolver
 
     async def validate_host_network_safety(self, host: Optional[str]) -> Tuple[bool, str]:
         """
@@ -214,7 +245,8 @@ class NightCrawlerHttpClient:
         extra_headers: Optional[Dict[str, str]] = None,
         data: Optional[Any] = None,
         json_data: Optional[Any] = None,
-        auth: Optional[aiohttp.BasicAuth] = None
+        auth: Optional[aiohttp.BasicAuth] = None,
+        authorized_provider: Optional[str] = None
     ) -> Tuple[Optional[int], Optional[str], Optional[str]]:
         """
         Execute an HTTP request (GET, POST, etc.) with hop-by-hop redirect verification.
@@ -227,11 +259,11 @@ class NightCrawlerHttpClient:
             async with sem:
                 token = _in_concurrency_scope.set(True)
                 try:
-                    return await self._request_impl(session, method, url, extra_headers, data, json_data, auth)
+                    return await self._request_impl(session, method, url, extra_headers, data, json_data, auth, authorized_provider=authorized_provider)
                 finally:
                     _in_concurrency_scope.reset(token)
         else:
-            return await self._request_impl(session, method, url, extra_headers, data, json_data, auth)
+            return await self._request_impl(session, method, url, extra_headers, data, json_data, auth, authorized_provider=authorized_provider)
 
     async def get(
         self,
@@ -262,7 +294,8 @@ class NightCrawlerHttpClient:
         extra_headers: Optional[Dict[str, str]] = None,
         data: Optional[Any] = None,
         json_data: Optional[Any] = None,
-        auth: Optional[aiohttp.BasicAuth] = None
+        auth: Optional[aiohttp.BasicAuth] = None,
+        authorized_provider: Optional[str] = None
     ) -> Tuple[Optional[int], Optional[str], Optional[str]]:
         initial_url = url.strip()
         current_url = initial_url
@@ -273,29 +306,33 @@ class NightCrawlerHttpClient:
 
         parsed_init = urlparse(initial_url)
         if parsed_init.scheme not in ("http", "https"):
-            logger.warning(f"[Security] Unsupported URL scheme '{parsed_init.scheme}' in {initial_url}")
+            logger.warning(f"[Security] Unsupported URL scheme '{parsed_init.scheme}' in {AuditLogger.redact_url(initial_url)}")
             return None, None, None
 
         if parsed_init.username or parsed_init.password:
-            logger.warning(f"[Security] Prohibited embedded credentials in URL: {initial_url}")
+            logger.warning(f"[Security] Prohibited embedded credentials in URL: {AuditLogger.redact_url(initial_url)}")
             return None, None, None
 
         initial_origin = f"{parsed_init.scheme}://{parsed_init.hostname}:{parsed_init.port or (443 if parsed_init.scheme == 'https' else 80)}"
 
         # Step 1: Pre-request Scope Check
-        if not self.scope_manager.is_url_in_scope(current_url):
-            logger.debug(f"[Scope] Blocked out-of-scope URL: {current_url}")
-            if self.audit_logger:
-                host = self.scope_manager.extract_hostname(current_url) or "unknown"
-                self.audit_logger.log_event(
-                    target_host=host,
-                    method=current_method,
-                    url=current_url,
-                    scope_decision="BLOCKED",
-                    policy_decision="DENIED",
-                    rate_limiter_decision="N/A"
-                )
-            return None, None, None
+        is_in_scope = self.scope_manager.is_url_in_scope(current_url)
+        if not is_in_scope:
+            if authorized_provider and self.is_provider_authorized(authorized_provider, current_url):
+                pass
+            else:
+                logger.debug(f"[Scope] Blocked out-of-scope URL: {AuditLogger.redact_url(current_url)}")
+                if self.audit_logger:
+                    host = self.scope_manager.extract_hostname(current_url) or "unknown"
+                    self.audit_logger.log_event(
+                        target_host=host,
+                        method=current_method,
+                        url=current_url,
+                        scope_decision="BLOCKED",
+                        policy_decision="DENIED",
+                        rate_limiter_decision="N/A"
+                    )
+                return None, None, None
 
         redirect_count = 0
         redirect_history = {current_url}
@@ -338,8 +375,20 @@ class NightCrawlerHttpClient:
             retry_count = 0
             while retry_count <= self.max_retries:
                 # Scope check before each request attempt
-                if not self.scope_manager.is_url_in_scope(current_url):
-                    logger.warning(f"[Scope] URL {current_url} is out of scope. Aborting attempt.")
+                is_curr_in_scope = self.scope_manager.is_url_in_scope(current_url)
+                if not is_curr_in_scope:
+                    if not (authorized_provider and self.is_provider_authorized(authorized_provider, current_url)):
+                        logger.warning(f"[Scope] URL {AuditLogger.redact_url(current_url)} is out of scope. Aborting attempt.")
+                        if self.audit_logger:
+                            host = self.scope_manager.extract_hostname(current_url) or "unknown"
+                            self.audit_logger.log_event(
+                                target_host=host,
+                                method=current_method,
+                                url=current_url,
+                                scope_decision="BLOCKED",
+                                policy_decision="DENIED"
+                            )
+                        return None, None, current_url
                     if self.audit_logger:
                         host = self.scope_manager.extract_hostname(current_url) or "unknown"
                         self.audit_logger.log_event(
@@ -430,17 +479,17 @@ class NightCrawlerHttpClient:
 
                             # Validate scheme support
                             if parsed_next.scheme not in ("http", "https"):
-                                logger.warning(f"[Security] Unsupported scheme in redirect destination: {next_url}")
+                                logger.warning(f"[Security] Unsupported scheme in redirect destination: {AuditLogger.redact_url(next_url)}")
                                 return response.status, None, current_url
 
                             # Prohibit credentials in redirect URL
                             if parsed_next.username or parsed_next.password:
-                                logger.warning(f"[Security] Credentials in redirect destination prohibited: {next_url}")
+                                logger.warning(f"[Security] Credentials in redirect destination prohibited: {AuditLogger.redact_url(next_url)}")
                                 return response.status, None, current_url
 
                             # Reject HTTPS to HTTP downgrade in strict or TLS-verified mode
                             if parsed_curr.scheme == "https" and parsed_next.scheme == "http" and (self.strict_mode or self.verify_tls):
-                                logger.warning(f"[Security] HTTPS-to-HTTP downgrade rejected for redirect {current_url} -> {next_url}")
+                                logger.warning(f"[Security] HTTPS-to-HTTP downgrade rejected for redirect {AuditLogger.redact_url(current_url)} -> {AuditLogger.redact_url(next_url)}")
                                 if self.audit_logger:
                                     next_host = self.scope_manager.extract_hostname(next_url) or "unknown"
                                     self.audit_logger.log_event(
@@ -455,27 +504,29 @@ class NightCrawlerHttpClient:
 
                             # Detect redirect loop
                             if next_url in redirect_history:
-                                logger.warning(f"[HTTP] Redirect loop detected for {next_url}")
+                                logger.warning(f"[HTTP] Redirect loop detected for {AuditLogger.redact_url(next_url)}")
                                 return response.status, None, current_url
                             redirect_history.add(next_url)
 
                             # Validate redirect target scope immediately
-                            if not self.scope_manager.is_url_in_scope(next_url):
-                                logger.warning(
-                                    f"[Scope] Redirect from {current_url} to out-of-scope target "
-                                    f"{next_url} was blocked!"
-                                )
-                                if self.audit_logger:
-                                    next_host = self.scope_manager.extract_hostname(next_url) or "unknown"
-                                    self.audit_logger.log_event(
-                                        target_host=next_host,
-                                        method=current_method,
-                                        url=next_url,
-                                        scope_decision="BLOCKED",
-                                        policy_decision="DENIED",
-                                        redirect_decision="BLOCKED_OUT_OF_SCOPE"
+                            is_redirect_in_scope = self.scope_manager.is_url_in_scope(next_url)
+                            if not is_redirect_in_scope:
+                                if not (authorized_provider and self.is_provider_authorized(authorized_provider, next_url)):
+                                    logger.warning(
+                                        f"[Scope] Redirect from {AuditLogger.redact_url(current_url)} to out-of-scope target "
+                                        f"{AuditLogger.redact_url(next_url)} was blocked!"
                                     )
-                                return response.status, None, current_url
+                                    if self.audit_logger:
+                                        next_host = self.scope_manager.extract_hostname(next_url) or "unknown"
+                                        self.audit_logger.log_event(
+                                            target_host=next_host,
+                                            method=current_method,
+                                            url=next_url,
+                                            scope_decision="BLOCKED",
+                                            policy_decision="DENIED",
+                                            redirect_decision="BLOCKED_OUT_OF_SCOPE"
+                                        )
+                                    return response.status, None, current_url
 
                             # Method and payload adjustment on 301, 302, 303
                             if response.status == 303 or (response.status in (301, 302) and current_method == "POST"):
@@ -505,7 +556,7 @@ class NightCrawlerHttpClient:
 
                 except (aiohttp.ClientSSLError, ssl.SSLError) as ssl_err:
                     # TLS verification failure - do NOT fallback to insecure
-                    logger.error(f"[TLS] Certificate verification failed for {current_url}: {ssl_err}")
+                    logger.error(f"[TLS] Certificate verification failed for {AuditLogger.redact_url(current_url)}: {ssl_err}")
                     raise ssl_err
 
                 except (aiohttp.ClientError, asyncio.TimeoutError) as net_err:
@@ -517,9 +568,9 @@ class NightCrawlerHttpClient:
                         backoff = 0.5 * retry_count
 
                     if retry_count > self.max_retries:
-                        logger.debug(f"[HTTP] Failed after {self.max_retries} retries: {current_url} ({net_err})")
+                        logger.debug(f"[HTTP] Failed after {self.max_retries} retries: {AuditLogger.redact_url(current_url)} ({net_err})")
                         return None, None, current_url
                     await asyncio.sleep(backoff)
 
-        logger.warning(f"[HTTP] Maximum redirects ({self.max_redirects}) exceeded for {url}")
+        logger.warning(f"[HTTP] Maximum redirects ({self.max_redirects}) exceeded for {AuditLogger.redact_url(url)}")
         return None, None, current_url

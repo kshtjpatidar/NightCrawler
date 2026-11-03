@@ -190,13 +190,16 @@ class NightCrawlerScanner:
             self.validate_keys = validate_keys
 
             self.scope_manager = scope_manager or ScopeManager(enabled=strict_scope)
-            self.rate_limiter = rate_limiter or GlobalRateLimiter(max_requests_per_second=max_requests_per_second)
+            self.request_policy_manager = request_policy_manager
+            if self.request_policy_manager:
+                self.rate_limiter = self.request_policy_manager.global_limiter
+            else:
+                self.rate_limiter = rate_limiter or GlobalRateLimiter(max_requests_per_second=max_requests_per_second)
             self.header_manager = header_manager or HeaderManager()
             self.auth_manager = auth_manager
             self.permission_manager = permission_manager or TestingPermissionManager(allow_credential_validation=validate_keys)
             self.tool_compatibility_manager = tool_compatibility_manager
             self.audit_logger = audit_logger
-            self.request_policy_manager = request_policy_manager
 
         self.timeout = aiohttp.ClientTimeout(total=self.timeout_seconds)
         self.depth = depth
