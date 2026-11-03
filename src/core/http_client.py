@@ -9,6 +9,7 @@ Asynchronous HTTP client guaranteeing:
 """
 
 import asyncio
+import contextvars
 import logging
 import ssl
 import socket
@@ -24,6 +25,9 @@ from src.core.rate_limiter import GlobalRateLimiter
 from src.core.header_manager import HeaderManager
 
 logger = logging.getLogger("nightcrawler.http")
+
+# Context variable to avoid double-acquisition of concurrency semaphore across nested/caller layers
+_in_concurrency_scope: contextvars.ContextVar[bool] = contextvars.ContextVar("nc_in_concurrency_scope", default=False)
 
 
 class ScopeViolationError(Exception):
@@ -211,8 +215,26 @@ class NightCrawlerHttpClient:
         """
         Execute an HTTP GET request with hop-by-hop redirect verification.
         Every actual attempt (initial, retry, redirect) consumes a rate limit token.
+        Guarantees that every network request uses the RequestPolicyManager semaphore.
         Returns: (status_code, content_text, final_url)
         """
+        sem = self.request_policy_manager.get_semaphore() if self.request_policy_manager else None
+        if sem is not None and not _in_concurrency_scope.get():
+            async with sem:
+                token = _in_concurrency_scope.set(True)
+                try:
+                    return await self._get_impl(session, url, extra_headers)
+                finally:
+                    _in_concurrency_scope.reset(token)
+        else:
+            return await self._get_impl(session, url, extra_headers)
+
+    async def _get_impl(
+        self,
+        session: aiohttp.ClientSession,
+        url: str,
+        extra_headers: Optional[Dict[str, str]] = None
+    ) -> Tuple[Optional[int], Optional[str], Optional[str]]:
         initial_url = url.strip()
         current_url = initial_url
 

@@ -33,7 +33,7 @@ from src.integrations.tools import (
 from src.core.scope import ScopeManager
 from src.core.rate_limiter import GlobalRateLimiter
 from src.core.header_manager import HeaderManager
-from src.core.http_client import NightCrawlerHttpClient
+from src.core.http_client import NightCrawlerHttpClient, _in_concurrency_scope
 from src.core.endpoints import EndpointExtractor, DiscoveredEndpoint, ExtractedJsMetadata
 from src.output.html_report import mask_secret
 
@@ -539,11 +539,15 @@ class NightCrawlerScanner:
 
             async def fetch_page_js(subdomain):
                 async with semaphore:
-                    url = f"https://{subdomain}"
-                    content = await self._fetch_url(session, url)
-                    if content:
-                        return self._extract_js_urls(url, content)
-                    return []
+                    token = _in_concurrency_scope.set(True)
+                    try:
+                        url = f"https://{subdomain}"
+                        content = await self._fetch_url(session, url)
+                        if content:
+                            return self._extract_js_urls(url, content)
+                        return []
+                    finally:
+                        _in_concurrency_scope.reset(token)
             
             tasks = [fetch_page_js(s) for s in subdomains[:100]]
             results = await asyncio.gather(*tasks)
@@ -569,12 +573,16 @@ class NightCrawlerScanner:
                     
                     async def scan_with_progress(url):
                         async with semaphore:
-                            findings = await self._scan_js_url(session, url)
-                            self.results.findings.extend(findings)
-                            self.results.total_findings = len(self.results.findings)
-                            self.results.total_validated = len([f for f in self.results.findings if f.validated])
-                            progress.advance(task)
-                            return findings
+                            token = _in_concurrency_scope.set(True)
+                            try:
+                                findings = await self._scan_js_url(session, url)
+                                self.results.findings.extend(findings)
+                                self.results.total_findings = len(self.results.findings)
+                                self.results.total_validated = len([f for f in self.results.findings if f.validated])
+                                progress.advance(task)
+                                return findings
+                            finally:
+                                _in_concurrency_scope.reset(token)
                     
                     await asyncio.gather(*[scan_with_progress(url) for url in all_js_urls])
             
@@ -620,10 +628,14 @@ class NightCrawlerScanner:
                 
                 async def scan_with_progress(url):
                     async with semaphore:
-                        findings = await self._scan_js_url(session, url)
-                        self.results.findings.extend(findings)
-                        progress.advance(task)
-                        return findings
+                        token = _in_concurrency_scope.set(True)
+                        try:
+                            findings = await self._scan_js_url(session, url)
+                            self.results.findings.extend(findings)
+                            progress.advance(task)
+                            return findings
+                        finally:
+                            _in_concurrency_scope.reset(token)
                 
                 await asyncio.gather(*[scan_with_progress(url) for url in urls])
             

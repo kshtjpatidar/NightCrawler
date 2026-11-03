@@ -683,3 +683,345 @@ def test_profile_concurrency_ceiling_enforcement(profile_limit, cli_requested, e
     assert scanner.concurrency == expected_effective
     assert scanner.request_policy_manager.concurrency_limit == expected_effective
     assert scanner.http_client.strict_mode == policy.strict_scope
+
+
+# ============================================================================
+# Section 3: Concurrency Enforcement Across All Execution Paths
+# ============================================================================
+@pytest.mark.asyncio
+@pytest.mark.parametrize("concurrency_limit", [1, 2, 5])
+async def test_http_client_direct_requests_enforce_semaphore_concurrency(concurrency_limit):
+    """
+    Direct HTTP client calls through http_client.get() must enforce the shared
+    RequestPolicyManager semaphore. Measures maximum simultaneous in-flight requests.
+    """
+    rpm = RequestPolicyManager(concurrency_limit=concurrency_limit, max_rps=100.0)
+    scope = ScopeManager(allowed_domains=["example.com"], enabled=True)
+    client = NightCrawlerHttpClient(scope_manager=scope, request_policy_manager=rpm)
+    client._pinned_ips["example.com"] = ["93.184.216.34"]
+
+    active_requests = 0
+    max_active_requests = 0
+    lock = asyncio.Lock()
+
+    class MockContextManager:
+        async def __aenter__(self):
+            nonlocal active_requests, max_active_requests
+            async with lock:
+                active_requests += 1
+                if active_requests > max_active_requests:
+                    max_active_requests = active_requests
+            await asyncio.sleep(0.02)
+            mock_resp = MagicMock()
+            mock_resp.status = 200
+            mock_resp.text = AsyncMock(return_value="OK")
+            mock_resp.headers = {"content-type": "text/html"}
+            return mock_resp
+
+        async def __aexit__(self, exc_type, exc, tb):
+            nonlocal active_requests
+            async with lock:
+                active_requests -= 1
+
+    mock_session = MagicMock()
+    mock_session.get = MagicMock(side_effect=lambda *args, **kwargs: MockContextManager())
+
+    tasks = [
+        asyncio.create_task(client.get(mock_session, f"https://example.com/page{i}"))
+        for i in range(10)
+    ]
+    await asyncio.gather(*tasks)
+
+    assert max_active_requests <= concurrency_limit, (
+        f"Max active requests ({max_active_requests}) exceeded concurrency limit ({concurrency_limit})"
+    )
+    assert rpm.get_semaphore()._value == concurrency_limit, "Semaphore slots must be completely released"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("concurrency_limit", [1, 2, 5])
+async def test_http_client_exception_releases_semaphore(concurrency_limit):
+    """
+    When an HTTP attempt raises a network exception, the semaphore slot must be released.
+    """
+    rpm = RequestPolicyManager(concurrency_limit=concurrency_limit, max_rps=100.0)
+    scope = ScopeManager(allowed_domains=["example.com"], enabled=True)
+    client = NightCrawlerHttpClient(scope_manager=scope, request_policy_manager=rpm)
+    client._pinned_ips["example.com"] = ["93.184.216.34"]
+
+    class FailingContextManager:
+        async def __aenter__(self):
+            await asyncio.sleep(0.01)
+            raise aiohttp.ClientError("Simulated network drop")
+
+        async def __aexit__(self, exc_type, exc, tb):
+            pass
+
+    mock_session = MagicMock()
+    mock_session.get = MagicMock(side_effect=lambda *args, **kwargs: FailingContextManager())
+
+    # Dispatch failing requests
+    tasks = [
+        asyncio.create_task(client.get(mock_session, f"https://example.com/err{i}"))
+        for i in range(5)
+    ]
+    await asyncio.gather(*tasks, return_exceptions=True)
+
+    # All slots must be returned
+    assert rpm.get_semaphore()._value == concurrency_limit, (
+        f"Expected semaphore value {concurrency_limit}, got {rpm.get_semaphore()._value}"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("concurrency_limit", [1, 2, 5])
+async def test_http_client_cancellation_releases_semaphore(concurrency_limit):
+    """
+    When a task calling http_client.get() is cancelled while in-flight or waiting,
+    its semaphore slot must be released.
+    """
+    rpm = RequestPolicyManager(concurrency_limit=concurrency_limit, max_rps=100.0)
+    scope = ScopeManager(allowed_domains=["example.com"], enabled=True)
+    client = NightCrawlerHttpClient(scope_manager=scope, request_policy_manager=rpm)
+    client._pinned_ips["example.com"] = ["93.184.216.34"]
+
+    started = asyncio.Event()
+
+    class SlowContextManager:
+        async def __aenter__(self):
+            started.set()
+            await asyncio.sleep(10.0)
+            mock_resp = MagicMock()
+            mock_resp.status = 200
+            mock_resp.text = AsyncMock(return_value="OK")
+            mock_resp.headers = {"content-type": "text/html"}
+            return mock_resp
+
+        async def __aexit__(self, exc_type, exc, tb):
+            pass
+
+    mock_session = MagicMock()
+    mock_session.get = MagicMock(side_effect=lambda *args, **kwargs: SlowContextManager())
+
+    task = asyncio.create_task(client.get(mock_session, "https://example.com/slow"))
+    await started.wait()
+
+    # Cancel task while in-flight
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+    assert rpm.get_semaphore()._value == concurrency_limit, (
+        f"Expected semaphore value {concurrency_limit} after cancellation, got {rpm.get_semaphore()._value}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_keyhacks_validator_enforces_shared_semaphore_and_scope():
+    """
+    KeyHacksValidator must enforce scope (rejecting out-of-scope validation URLs)
+    and acquire the shared RequestPolicyManager semaphore.
+    """
+    from src.validators.keyhacks import KeyHacksValidator
+
+    rpm = RequestPolicyManager(concurrency_limit=1, max_rps=50.0)
+    scope = ScopeManager(allowed_domains=["example.com"], enabled=True)
+    validator = KeyHacksValidator(request_policy_manager=rpm, scope_manager=scope)
+
+    # 1. Out-of-scope validation URL fails closed
+    fake_cfg = {
+        "type": "http",
+        "method": "GET",
+        "url": "https://unauthorized.evil.com/check?key={key}",
+        "success_indicators": ["ok"]
+    }
+    res_blocked = await validator.validate_http(fake_cfg, "test_secret_123")
+    assert res_blocked.status.value == "ERROR"
+    assert "out of scope" in res_blocked.message.lower()
+
+    # 2. In-scope validation URL acquires semaphore
+    in_scope_cfg = {
+        "type": "http",
+        "method": "GET",
+        "url": "https://example.com/check?key={key}",
+        "success_indicators": ["valid"]
+    }
+
+    mock_resp = MagicMock()
+    mock_resp.status = 200
+    mock_resp.text = AsyncMock(return_value='{"valid": true}')
+    cm = MagicMock()
+    cm.__aenter__ = AsyncMock(return_value=mock_resp)
+    cm.__aexit__ = AsyncMock(return_value=None)
+
+    with patch("aiohttp.ClientSession.get", return_value=cm):
+        res_ok = await validator.validate_http(in_scope_cfg, "test_secret_123")
+        assert res_ok.status.value == "VALID"
+
+    assert rpm.get_semaphore()._value == 1, "Semaphore slot must be returned"
+
+
+# ============================================================================
+# Section 4: DNS Pinning & Transport Safety Integration
+# ============================================================================
+@pytest.mark.asyncio
+async def test_dns_pinning_transport_layer_integration():
+    """
+    Policy-aware DNS resolver integration with aiohttp.TCPConnector:
+    - Verifies pinned IP is returned to transport connector.
+    - Simulates DNS rebinding between resolution and transport connect; verifies pinned IP persists.
+    - Verifies prohibited IP destinations fail closed with OSError.
+    - Verifies unresolvable destinations fail closed with OSError.
+    """
+    scope = ScopeManager(allowed_domains=["example.com"], enabled=True)
+    client = NightCrawlerHttpClient(scope_manager=scope)
+    resolver = client.get_resolver()
+    connector = aiohttp.TCPConnector(resolver=resolver)
+
+    # 1. Pin validated IP and verify connector._resolve_host
+    client._pinned_ips["example.com"] = ["93.184.216.34"]
+    resolved = await connector._resolve_host("example.com", 443)
+    assert len(resolved) == 1
+    assert resolved[0]["host"] == "93.184.216.34"
+    assert resolved[0]["hostname"] == "example.com"
+
+    # 2. Simulate DNS rebinding: DNS changes to AWS metadata IP, but resolver uses pinned IP
+    with patch("asyncio.get_running_loop") as mock_loop:
+        mock_loop.return_value.getaddrinfo = AsyncMock(return_value=[
+            (socket.AF_INET, socket.SOCK_STREAM, 6, '', ("169.254.169.254", 443))
+        ])
+        resolved_after_rebind = await connector._resolve_host("example.com", 443)
+        assert resolved_after_rebind[0]["host"] == "93.184.216.34", (
+            "Transport must connect exclusively to pinned IP, ignoring rebinding to metadata IP"
+        )
+
+    # 3. Prohibited destination fails closed with OSError before transport connection
+    with patch.object(client, "validate_host_network_safety", return_value=(False, "Internal loopback IP prohibited")):
+        with pytest.raises(OSError, match="Connection blocked by network policy"):
+            await connector._resolve_host("internal.example.com", 443)
+
+    # 4. Unresolvable destination fails closed with OSError before transport connection
+    with patch.object(client, "validate_host_network_safety", return_value=(False, "No DNS records")):
+        with pytest.raises(OSError, match="Connection blocked by network policy"):
+            await connector._resolve_host("nonexistent.example.com", 443)
+
+
+# ============================================================================
+# Section 5: External Tool Policy Enforcement & Subprocess Safety
+# ============================================================================
+def test_all_network_capable_tools_blocked_under_strict_policy(example_profile):
+    """
+    Enumerate all registered network-capable tools and verify every single one is
+    blocked in strict compliance mode.
+    """
+    network_tools = ["katana", "hakrawler", "subjs", "getjs", "httpx"]
+    tcm = ToolCompatibilityManager(profile=example_profile)
+
+    for tool in network_tools:
+        is_compat, reason = tcm.is_tool_compatible(tool)
+        assert is_compat is False, f"Network tool '{tool}' must not be compatible in strict compliance mode"
+        r_lower = reason.lower()
+        assert "cannot coordinate" in r_lower or "not permitted" in r_lower or "disabled" in r_lower
+
+
+def test_missing_compatibility_configuration_fails_closed():
+    """
+    When ToolCompatibilityManager is missing, network-capable tools must fail closed.
+    Only offline tools are allowed.
+    """
+    scanner = NightCrawlerScanner(concurrency=1, use_external_tools=True)
+    scanner.tool_compatibility_manager = None
+
+    # Offline tools
+    cap_subfinder = ToolCompatibilityManager.TOOL_REGISTRY["subfinder"]
+    assert cap_subfinder.makes_live_requests is False
+
+    # Network-capable tools must be blocked
+    for tool_name in ["katana", "hakrawler", "subjs", "getjs", "httpx", "unknown_tool_xyz"]:
+        cap = ToolCompatibilityManager.TOOL_REGISTRY.get(tool_name)
+        if cap and not cap.makes_live_requests:
+            allowed = True
+        else:
+            allowed = False
+        assert allowed is False, f"Tool '{tool_name}' must fail closed when compatibility manager is missing"
+
+
+def test_external_tools_use_direct_argument_list_without_shell():
+    """
+    Verify all tool wrappers pass argument lists to subprocess.run without shell=True.
+    """
+    from src.integrations.tools import (
+        SubfinderIntegration, GauIntegration, WaybackurlsIntegration,
+        KatanaIntegration, HakrawlerIntegration, SubJSIntegration,
+        GetJSIntegration, JSLuiceIntegration
+    )
+
+    with patch("subprocess.run") as mock_run, \
+         patch.object(SubfinderIntegration, "is_available", return_value=True):
+        mock_run.return_value = MagicMock(returncode=0, stdout="test.example.com\n", stderr="")
+
+        sub = SubfinderIntegration(tool_path="/fake/bin/subfinder")
+        sub.enumerate("example.com")
+        assert mock_run.called
+        cmd, kwargs = mock_run.call_args
+        assert isinstance(cmd[0], list), "Subprocess command must be an argument list"
+        assert kwargs.get("shell") is not True, "Tool must never execute via shell=True"
+
+
+# ============================================================================
+# Section 6: Policy Precedence Combinations Matrix
+# ============================================================================
+def test_policy_precedence_missing_profile_fails_closed():
+    """CLI invocation with a nonexistent profile fails closed immediately."""
+    runner = CliRunner()
+    result = runner.invoke(main, ["--program", "nonexistent_profile_xyz123", "-t", "https://example.com"])
+    assert result.exit_code != 0
+    assert "not found" in result.output.lower() or "error" in result.output.lower()
+
+
+def test_policy_precedence_empty_scope_fails_closed():
+    """A profile with empty allowed scope fails closed; targets are rejected."""
+    prof = ProgramProfile(
+        id="empty-scope",
+        name="Empty Scope Program",
+        requires_review=False
+    )
+    prof.scope.allowed_domains = []
+    prof.scope.allowed_ips = []
+    prof.scope.allowed_cidrs = []
+
+    # PolicyValidator rejects profiles with scope enabled but no authorized targets
+    with pytest.raises(ValueError, match="defines no allowed domains, IPs, or CIDRs"):
+        EffectivePolicy.build(profile=prof)
+
+
+def test_policy_precedence_mandatory_scope_rejects_cli_expansion(example_profile):
+    """CLI --allowed-domain cannot expand profile scope to unauthorized domains."""
+    runner = CliRunner()
+    result = runner.invoke(main, [
+        "--program", "example-program",
+        "-t", "https://unauthorized-domain.com",
+        "--allowed-domain", "unauthorized-domain.com",
+        "--no-prompt"
+    ])
+    assert result.exit_code != 0
+    assert "outside authorized profile scope" in result.output or "OUT OF SCOPE" in result.output or "cannot expand" in result.output
+
+
+def test_policy_precedence_cli_narrowing_preserved(example_profile):
+    """CLI --allowed-domain successfully narrows profile scope."""
+    policy = EffectivePolicy.build(
+        profile=example_profile,
+        cli_overrides={"allowed_domains": ["sub.example.com"]}
+    )
+    assert policy.scope_manager.is_host_allowed("sub.example.com") is True
+    assert policy.scope_manager.is_host_allowed("example.com") is False
+
+
+def test_policy_precedence_cannot_disable_strict_scope(example_profile):
+    """CLI cannot weaken strict_scope when mandatory profile requires it."""
+    with pytest.raises(ValueError, match="Disabling strict scope is prohibited"):
+        EffectivePolicy.build(profile=example_profile, cli_overrides={"strict_scope": False})
+

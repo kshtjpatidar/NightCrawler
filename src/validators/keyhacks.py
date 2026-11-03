@@ -20,7 +20,7 @@ import asyncio
 import aiohttp
 import json
 import re
-from typing import Dict, Optional, Tuple, List
+from typing import Dict, Optional, Tuple, List, Any
 from dataclasses import dataclass
 from enum import Enum
 from rich.console import Console
@@ -967,9 +967,17 @@ class KeyHacksValidator:
 ╚══════════════════════════════════════════════════════════════════════════════╝
 """
     
-    def __init__(self, timeout: int = 10, verify_ssl: bool = False):
+    def __init__(
+        self,
+        timeout: int = 10,
+        verify_ssl: bool = False,
+        request_policy_manager: Optional[Any] = None,
+        scope_manager: Optional[Any] = None
+    ):
         self.timeout = aiohttp.ClientTimeout(total=timeout)
         self.verify_ssl = verify_ssl
+        self.request_policy_manager = request_policy_manager
+        self.scope_manager = scope_manager
         self.validated_count = 0
         self.valid_secrets = []
     
@@ -991,44 +999,24 @@ class KeyHacksValidator:
         return None
     
     async def validate_http(self, validator: Dict, secret: str, extra_params: Dict = None) -> ValidationResult:
-        """Validate secret using HTTP request"""
+        """Validate secret using HTTP request under shared concurrency and scope policy"""
         try:
             url = validator["url"].format(key=secret, **(extra_params or {}))
             method = validator.get("method", "GET").upper()
-            headers = {}
-            
-            # Build headers
-            if "headers" in validator:
-                for k, v in validator["headers"].items():
-                    headers[k] = v.format(key=secret, **(extra_params or {}))
-            
-            # Build auth
-            auth = None
-            if validator.get("auth") == "basic":
-                auth_user = validator.get("auth_user", "").format(key=secret, **(extra_params or {}))
-                auth_pass = validator.get("auth_pass", "").format(key=secret, **(extra_params or {}))
-                auth = aiohttp.BasicAuth(auth_user, auth_pass)
-            
-            # Build body
-            body = None
-            if "body" in validator:
-                body = validator["body"].format(key=secret, **(extra_params or {}))
-            
-            # Build data
-            data = None
-            if "data" in validator:
-                data = {k: v.format(key=secret) for k, v in validator["data"].items()}
-            
-            async with aiohttp.ClientSession(timeout=self.timeout) as session:
-                if method == "GET":
-                    async with session.get(url, headers=headers, auth=auth, ssl=self.verify_ssl) as resp:
-                        response_text = await resp.text()
-                        return self._analyze_response(validator, response_text, resp.status, url)
-                elif method == "POST":
-                    async with session.post(url, headers=headers, auth=auth, data=body or data, ssl=self.verify_ssl) as resp:
-                        response_text = await resp.text()
-                        return self._analyze_response(validator, response_text, resp.status, url)
-        
+
+            if self.scope_manager and not self.scope_manager.is_url_in_scope(url):
+                return ValidationResult(
+                    status=ValidationStatus.ERROR,
+                    message="Target validation URL is out of scope",
+                    validation_command=f"curl -X {method} '{url}'"
+                )
+
+            sem = self.request_policy_manager.get_semaphore() if self.request_policy_manager else None
+            if sem:
+                async with sem:
+                    return await self._do_validate_http(validator, secret, extra_params, url, method)
+            else:
+                return await self._do_validate_http(validator, secret, extra_params, url, method)
         except asyncio.TimeoutError:
             return ValidationResult(
                 status=ValidationStatus.UNKNOWN,
@@ -1041,6 +1029,41 @@ class KeyHacksValidator:
                 message=f"Validation error: {str(e)[:100]}",
                 validation_command=f"curl -X {method} '{url}'"
             )
+
+    async def _do_validate_http(self, validator: Dict, secret: str, extra_params: Dict, url: str, method: str) -> ValidationResult:
+        headers = {}
+        
+        # Build headers
+        if "headers" in validator:
+            for k, v in validator["headers"].items():
+                headers[k] = v.format(key=secret, **(extra_params or {}))
+        
+        # Build auth
+        auth = None
+        if validator.get("auth") == "basic":
+            auth_user = validator.get("auth_user", "").format(key=secret, **(extra_params or {}))
+            auth_pass = validator.get("auth_pass", "").format(key=secret, **(extra_params or {}))
+            auth = aiohttp.BasicAuth(auth_user, auth_pass)
+        
+        # Build body
+        body = None
+        if "body" in validator:
+            body = validator["body"].format(key=secret, **(extra_params or {}))
+        
+        # Build data
+        data = None
+        if "data" in validator:
+            data = {k: v.format(key=secret) for k, v in validator["data"].items()}
+        
+        async with aiohttp.ClientSession(timeout=self.timeout) as session:
+            if method == "GET":
+                async with session.get(url, headers=headers, auth=auth, ssl=self.verify_ssl) as resp:
+                    response_text = await resp.text()
+                    return self._analyze_response(validator, response_text, resp.status, url)
+            elif method == "POST":
+                async with session.post(url, headers=headers, auth=auth, data=body or data, ssl=self.verify_ssl) as resp:
+                    response_text = await resp.text()
+                    return self._analyze_response(validator, response_text, resp.status, url)
     
     def _analyze_response(self, validator: Dict, response: str, status_code: int, url: str) -> ValidationResult:
         """Analyze HTTP response to determine validity"""
