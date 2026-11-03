@@ -4,8 +4,9 @@ Strict, configurable multi-program target scope validation with CIDR, IP, wildca
 path exclusion, protocol, port, and third-party boundary checks.
 """
 
-from typing import List, Set, Optional, Iterable, Dict, Any, Union
-from urllib.parse import urlparse
+from typing import List, Set, Optional, Iterable, Dict, Any, Union, Tuple
+from urllib.parse import urlparse, unquote
+import posixpath
 import re
 import ipaddress
 
@@ -214,6 +215,72 @@ class ScopeManager:
 
         return False
 
+    # Prohibited network destinations: private, loopback, link-local, cloud metadata, and internal RFC blocks
+    PROHIBITED_NETWORKS = [
+        ipaddress.ip_network("127.0.0.0/8"),      # IPv4 Loopback
+        ipaddress.ip_network("10.0.0.0/8"),       # Private RFC 1918
+        ipaddress.ip_network("172.16.0.0/12"),    # Private RFC 1918
+        ipaddress.ip_network("192.168.0.0/16"),   # Private RFC 1918
+        ipaddress.ip_network("169.254.0.0/16"),   # Link-local / Cloud metadata (AWS, GCP, Azure)
+        ipaddress.ip_network("0.0.0.0/8"),        # This host / broadcast
+        ipaddress.ip_network("100.64.0.0/10"),    # Carrier-grade NAT
+        ipaddress.ip_network("198.18.0.0/15"),    # Benchmark testing
+        ipaddress.ip_network("::1/128"),          # IPv6 loopback
+        ipaddress.ip_network("fc00::/7"),         # IPv6 unique local
+        ipaddress.ip_network("fe80::/10"),        # IPv6 link-local
+        ipaddress.ip_network("::ffff:0:0/96"),    # IPv4-mapped IPv6
+    ]
+
+    def is_ip_prohibited(self, ip_obj: Union[ipaddress.IPv4Address, ipaddress.IPv6Address]) -> bool:
+        """
+        Check if an IP address violates network restrictions (e.g. private, loopback,
+        link-local, cloud metadata, or internal networks), unless explicitly allowed in scope.
+        """
+        # If explicitly included in allowed_ips or allowed_cidrs, it is permitted
+        if ip_obj in self.allowed_ips:
+            return False
+        for net in self.allowed_cidrs:
+            if ip_obj in net:
+                return False
+
+        # Check against prohibited networks
+        for net in self.PROHIBITED_NETWORKS:
+            if ip_obj in net:
+                return True
+
+        if (ip_obj.is_private or ip_obj.is_loopback or ip_obj.is_link_local 
+                or ip_obj.is_multicast or ip_obj.is_reserved or ip_obj.is_unspecified):
+            return True
+
+        return False
+
+    def validate_destination_ip(self, host_or_ip: str) -> Tuple[bool, str]:
+        """
+        Validate whether an IP address or resolved IP is safe and conforms to program network policy.
+        Returns (is_safe, reason).
+        """
+        try:
+            ip_obj = ipaddress.ip_address(host_or_ip.strip())
+        except ValueError:
+            return True, "Hostname will be validated upon DNS resolution."
+
+        # Explicit exclusions take highest precedence
+        if ip_obj in self.excluded_ips:
+            return False, f"IP address '{ip_obj}' is explicitly excluded in program scope."
+        for exc_net in self.excluded_cidrs:
+            if ip_obj in exc_net:
+                return False, f"IP address '{ip_obj}' falls within excluded CIDR range '{exc_net}'."
+
+        if self.is_ip_prohibited(ip_obj):
+            return False, f"Destination IP '{ip_obj}' is prohibited (internal, loopback, or link-local address)."
+
+        # If scope is enabled, verify it's allowed if non-domain scope is in use
+        if self.enabled:
+            if not self.is_ip_allowed(ip_obj):
+                return False, f"Destination IP '{ip_obj}' is not in authorized IP/CIDR scope."
+
+        return True, "IP address is authorized."
+
     def is_ip_allowed(self, ip_obj: Union[ipaddress.IPv4Address, ipaddress.IPv6Address]) -> bool:
         """Check if an IP address is within allowed IP/CIDR scope and not excluded."""
         # 1. Check IP exclusions
@@ -225,11 +292,15 @@ class ScopeManager:
             if ip_obj in exc_net:
                 return False
 
-        # 3. Check allowed IPs
+        # 3. Check prohibited networks (e.g. loopback, private) unless explicitly allowed
+        if self.is_ip_prohibited(ip_obj):
+            return False
+
+        # 4. Check allowed IPs
         if ip_obj in self.allowed_ips:
             return True
 
-        # 4. Check allowed CIDRs
+        # 5. Check allowed CIDRs
         for inc_net in self.allowed_cidrs:
             if ip_obj in inc_net:
                 return True
@@ -329,14 +400,24 @@ class ScopeManager:
             if not self.is_host_allowed(host):
                 return False
 
-            # Path check
-            path = parsed.path or "/"
+            # Path check with URL-decoding and normalization (traversal/encoding bypass defense)
+            raw_path = parsed.path or "/"
+            decoded_path = unquote(raw_path)
+            norm_path = posixpath.normpath(decoded_path)
+            if decoded_path.endswith("/") and not norm_path.endswith("/"):
+                norm_path += "/"
+
             for exc_path in self.excluded_paths:
-                if exc_path and path.startswith(exc_path):
+                if not exc_path:
+                    continue
+                # Reject if raw, decoded, or normalized path matches excluded path
+                if (raw_path.startswith(exc_path) or 
+                    decoded_path.startswith(exc_path) or 
+                    norm_path.startswith(exc_path)):
                     return False
 
             if self.allowed_paths:
-                if not any(path.startswith(inc_path) for inc_path in self.allowed_paths):
+                if not any(raw_path.startswith(p) or decoded_path.startswith(p) or norm_path.startswith(p) for p in self.allowed_paths):
                     return False
 
             return True

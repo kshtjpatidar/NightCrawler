@@ -175,12 +175,14 @@ class AuthenticationManager:
         self,
         url: str,
         scope_manager: Optional[ScopeManager] = None,
-        base_headers: Optional[Dict[str, str]] = None
+        base_headers: Optional[Dict[str, str]] = None,
+        is_cross_origin: bool = False
     ) -> Dict[str, str]:
         """
         Build headers for a request destination.
         CRITICAL: If the URL is out of scope or third-party, NO authentication
         or program-specific headers are attached!
+        CRITICAL: Cross-origin redirects strip sensitive authentication tokens and cookies!
         """
         headers = dict(base_headers or {})
 
@@ -189,15 +191,33 @@ class AuthenticationManager:
             headers["User-Agent"] = "NightCrawler-BugBounty-Recon/5.0"
 
         sc = scope_manager or self.scope_manager
-        # If scope is active and destination is out of scope, NEVER attach credentials
+        # If scope is active and destination is out of scope, NEVER attach credentials or researcher headers
         if sc and sc.enabled:
             if not sc.is_url_in_scope(url):
+                # Out-of-scope destination: remove all sensitive headers and return unauthenticated
+                headers.pop("Authorization", None)
+                headers.pop("authorization", None)
+                headers.pop("Cookie", None)
+                headers.pop("cookie", None)
+                for k in self._custom_headers:
+                    headers.pop(k, None)
                 return headers
 
-        # Target is authorized and in-scope: safely attach program headers & credentials
+        # Target is authorized and in-scope: safely attach researcher identification headers
         for k, v in self._custom_headers.items():
             headers[k] = v
 
+        # Cross-Origin Protection:
+        # If this request is following a cross-origin redirect, sensitive credentials
+        # (Authorization header, session cookies, API tokens) must NOT be forwarded!
+        if is_cross_origin:
+            headers.pop("Authorization", None)
+            headers.pop("authorization", None)
+            headers.pop("Cookie", None)
+            headers.pop("cookie", None)
+            return headers
+
+        # Same-origin: attach auth header and cookies if configured
         if self._auth_header_name and self._auth_header_value:
             headers[self._auth_header_name] = self._auth_header_value
 

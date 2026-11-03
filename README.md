@@ -235,7 +235,42 @@ reporting:
 
 ---
 
-## 🛡️ Scope Configuration
+## ⚖️ Policy Precedence & Security Invariants
+
+NightCrawler enforces a deterministic, 4-tier configuration precedence model where a lower-priority source can **never** weaken a higher-priority security invariant:
+
+```
+┌────────────────────────────────────────────────────────────────────────┐
+│ 1. Mandatory Security Restrictions (Immutable Engine Safety Ceilings)  │
+│    - Hard rate limits (e.g. UXCam hard max 5.0 RPS)                    │
+│    - Strict scope enforcement (prohibits --no-scope when strict)       │
+│    - Insecure TLS rejection (prohibits --no-verify-tls in strict mode) │
+│    - Permanent prohibitions: DoS, destructive testing, injection       │
+├────────────────────────────────────────────────────────────────────────┤
+│ 2. Validated Program Profile (programs/<id>/program.yaml)              │
+│    - Scope definitions (exact/wildcard domains, CIDRs, path rules)     │
+│    - Network policies & third-party service exclusions                 │
+│    - Mandatory authentication & researcher headers                     │
+│    - Tool restrictions & active/passive capability gates               │
+├────────────────────────────────────────────────────────────────────────┤
+│ 3. Configuration File (config.yaml fallback)                           │
+│    - Base concurrency, timeouts, depth, templates, and reporter details │
+├────────────────────────────────────────────────────────────────────────┤
+│ 4. Explicit CLI Flag Overrides (permitted overrides only)              │
+│    - Explicit CLI values override lower tiers only if permitted        │
+│    - Absent CLI options (None) NEVER overwrite existing valid config   │
+└────────────────────────────────────────────────────────────────────────┘
+```
+
+### Network Safety & Invariant Protections
+
+- **Prohibited IP & SSRF Defense**: Targets or DNS-resolved IP addresses mapping to private, loopback, link-local, cloud metadata (`169.254.169.254`), or internal networks (RFC 1918) are rejected before any network traffic is transmitted, unless explicitly authorized in the profile's `allowed_ips` or `allowed_cidrs`.
+- **Cross-Origin Credential Stripping**: When an in-scope request is redirected cross-origin, sensitive credentials (`Authorization` header, session cookies, API tokens) are stripped immediately before following the hop, even if both origins are independently in scope. Researcher identification headers (`X-User-Id`, `X-Bug-Bounty`) remain attached.
+- **Path Normalization & Directory Traversal Defense**: All path allowlists and exclusions are evaluated against the raw URL path, URL-decoded path, and `posixpath`-normalized path, preventing directory traversal (`..`) and percent-encoding obfuscation bypasses.
+- **Fail-Closed Initialization**: Scanning is aborted before network socket creation if the program profile is invalid, scope is empty or malformed, mandatory authentication is missing, or required security managers fail to initialize.
+- **Strict Mocked-Network Test Isolation**: All automated integration and regression tests run under an active socket guard fixture that blocks unmocked outbound network socket creation, ensuring zero live requests are sent during development and verification.
+
+---
 
 NightCrawler's `ScopeManager` enforces comprehensive boundaries:
 

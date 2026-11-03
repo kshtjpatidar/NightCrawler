@@ -11,8 +11,10 @@ Asynchronous HTTP client guaranteeing:
 import asyncio
 import logging
 import ssl
-from typing import Optional, Dict, Tuple, Any
-from urllib.parse import urljoin
+import socket
+import ipaddress
+from typing import Optional, Dict, Tuple, Any, List
+from urllib.parse import urljoin, urlparse
 import aiohttp
 
 from src.core.scope import ScopeManager
@@ -95,6 +97,32 @@ class NightCrawlerHttpClient:
         else:
             self.ssl_context = False
 
+    async def validate_host_network_safety(self, host: Optional[str]) -> Tuple[bool, str]:
+        """Verify that the host does not resolve to a prohibited private, loopback, or internal IP."""
+        if not host:
+            return False, "Empty or missing host"
+
+        # Check if host is directly an IP
+        try:
+            ip_obj = ipaddress.ip_address(host)
+            return self.scope_manager.validate_destination_ip(str(ip_obj))
+        except ValueError:
+            pass
+
+        # Check DNS resolution
+        try:
+            loop = asyncio.get_running_loop()
+            addrinfo = await loop.getaddrinfo(host, None, proto=socket.IPPROTO_TCP)
+            for family, socktype, proto, canonname, sockaddr in addrinfo:
+                ip_str = sockaddr[0]
+                safe, reason = self.scope_manager.validate_destination_ip(ip_str)
+                if not safe:
+                    return False, f"Host '{host}' resolves to prohibited IP '{ip_str}': {reason}"
+        except Exception as e:
+            logger.debug(f"[DNS] Host network check for {host}: {e}")
+
+        return True, "Destination conforms to network policy."
+
     async def get(
         self,
         session: aiohttp.ClientSession,
@@ -106,7 +134,11 @@ class NightCrawlerHttpClient:
         Every actual attempt (initial, retry, redirect) consumes a rate limit token.
         Returns: (status_code, content_text, final_url)
         """
-        current_url = url.strip()
+        initial_url = url.strip()
+        current_url = initial_url
+
+        parsed_init = urlparse(initial_url)
+        initial_origin = f"{parsed_init.scheme}://{parsed_init.hostname}:{parsed_init.port or (443 if parsed_init.scheme == 'https' else 80)}"
 
         # Step 1: Pre-request Scope Check
         if not self.scope_manager.is_url_in_scope(current_url):
@@ -126,12 +158,17 @@ class NightCrawlerHttpClient:
         redirect_count = 0
 
         while redirect_count <= self.max_redirects:
-            # Build headers (credentials only attached if current_url is in-scope)
+            parsed_curr = urlparse(current_url)
+            curr_origin = f"{parsed_curr.scheme}://{parsed_curr.hostname}:{parsed_curr.port or (443 if parsed_curr.scheme == 'https' else 80)}"
+            is_cross_origin = (redirect_count > 0 and curr_origin != initial_origin)
+
+            # Build headers (credentials only attached if current_url is in-scope and not cross-origin)
             if self.auth_manager:
                 headers = self.auth_manager.get_headers_for_url(
                     current_url,
                     scope_manager=self.scope_manager,
-                    base_headers=extra_headers
+                    base_headers=extra_headers,
+                    is_cross_origin=is_cross_origin
                 )
             else:
                 headers = self.header_manager.get_headers_for_url(
@@ -154,6 +191,22 @@ class NightCrawlerHttpClient:
                             url=current_url,
                             scope_decision="BLOCKED",
                             policy_decision="DENIED"
+                        )
+                    return None, None, current_url
+
+                # Validate destination IP safety before sending network request
+                host = self.scope_manager.extract_hostname(current_url)
+                safe, reason = await self.validate_host_network_safety(host)
+                if not safe:
+                    logger.warning(f"[Scope] Prohibited IP destination detected for {host}: {reason}")
+                    if self.audit_logger:
+                        self.audit_logger.log_event(
+                            target_host=host or "unknown",
+                            method="GET",
+                            url=current_url,
+                            scope_decision="BLOCKED",
+                            policy_decision="DENIED",
+                            security_reason=reason
                         )
                     return None, None, current_url
 

@@ -69,7 +69,8 @@ class AuditLogger:
         tool_name: str = "nightcrawler_http",
         response_status: Optional[int] = None,
         redirect_decision: Optional[str] = None,
-        extra: Optional[Dict[str, Any]] = None
+        extra: Optional[Dict[str, Any]] = None,
+        **kwargs
     ):
         """Append an audit record to the structured audit log."""
         record = {
@@ -86,6 +87,8 @@ class AuditLogger:
             "redirect_decision": redirect_decision,
             "extra": extra or {}
         }
+        if kwargs:
+            record.update(kwargs)
 
         try:
             with open(self.log_file, "a", encoding="utf-8") as f:

@@ -22,7 +22,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from click.testing import CliRunner
 
 from main import main
+from src.core.program_profile import ProgramProfile
 from src.core.program_manager import ProgramManager
+from src.core.scope import ScopeManager
 from src.core.effective_policy import EffectivePolicy
 from src.core.request_config import NightCrawlerConfig
 from src.core.request_policy import RequestPolicyManager
@@ -420,3 +422,323 @@ def test_scenario_j_report_format_selection(uxcam_profile, tmp_path):
     txt_file = tmp_path / "out.txt"
     with pytest.raises(ValueError, match="Unsupported report output format"):
         rep_mgr.generate([dummy_finding], scan_res, str(txt_file))
+
+
+# ============================================================================
+# Scenario K: Wildcard domain boundaries and lookalike hostname rejection
+# ============================================================================
+@pytest.mark.asyncio
+async def test_scenario_k_wildcard_boundaries_and_lookalikes():
+    """
+    Scenario K: Verify exact wildcard subdomain boundaries and rejection of lookalike
+    and suffix-confusion hostnames. Assert zero mock requests sent to lookalikes.
+    """
+    scope = ScopeManager(allowed_domains=["*.uxcam.com"], enabled=True)
+    assert scope.is_host_allowed("app.uxcam.com") is True
+    assert scope.is_host_allowed("api.v2.app.uxcam.com") is True
+
+    # Lookalike and boundary attack hosts
+    lookalikes = [
+        "eviluxcam.com",
+        "uxcam.com.attacker.com",
+        "app-uxcam.com",
+        "uxcam.com@evil.com",
+        "fakeuxcam.com",
+        "uxcаm.com",  # Homoglyph (Cyrillic a)
+        "not.uxcam.com.evil.org"
+    ]
+    for lh in lookalikes:
+        assert scope.is_host_allowed(lh) is False
+        assert scope.is_url_in_scope(f"https://{lh}/collect") is False
+
+    # Assert mock transport receives zero requests for lookalike targets
+    policy = EffectivePolicy.build(
+        config=NightCrawlerConfig(allowed_domains=["*.uxcam.com"], strict_scope=True)
+    )
+    http_client = NightCrawlerHttpClient(effective_policy=policy)
+
+    mock_session = MagicMock()
+    mock_session.get = MagicMock()
+
+    for lh in lookalikes:
+        status, content, final_url = await http_client.get(mock_session, f"https://{lh}/test")
+        assert status is None
+        assert mock_session.get.call_count == 0
+
+
+# ============================================================================
+# Scenario L: Apex domain behavior
+# ============================================================================
+@pytest.mark.asyncio
+async def test_scenario_l_apex_domain_behavior():
+    """
+    Scenario L: Verify apex-only vs wildcard-only behavior.
+    - Apex-only allows apex, rejects subdomains.
+    - Wildcard-only allows subdomains, rejects apex.
+    - Combined allows both.
+    Assert zero mock requests dispatched to rejected destinations.
+    """
+    # Apex only
+    scope_apex = ScopeManager(allowed_domains=["uxcam.com"], enabled=True)
+    assert scope_apex.is_host_allowed("uxcam.com") is True
+    assert scope_apex.is_host_allowed("app.uxcam.com") is False
+
+    # Wildcard only
+    scope_wild = ScopeManager(allowed_domains=["*.uxcam.com"], enabled=True)
+    assert scope_wild.is_host_allowed("app.uxcam.com") is True
+    assert scope_wild.is_host_allowed("uxcam.com") is False
+
+    # Combined
+    scope_both = ScopeManager(allowed_domains=["uxcam.com", "*.uxcam.com"], enabled=True)
+    assert scope_both.is_host_allowed("uxcam.com") is True
+    assert scope_both.is_host_allowed("app.uxcam.com") is True
+
+    # Zero mock transport requests when apex is rejected by wildcard-only policy
+    policy_wild = EffectivePolicy.build(
+        config=NightCrawlerConfig(allowed_domains=["*.uxcam.com"], strict_scope=True)
+    )
+    client_wild = NightCrawlerHttpClient(effective_policy=policy_wild)
+    mock_session = MagicMock()
+    mock_session.get = MagicMock()
+
+    status, _, _ = await client_wild.get(mock_session, "https://uxcam.com")
+    assert status is None
+    assert mock_session.get.call_count == 0
+
+
+# ============================================================================
+# Scenario M: Multi-hop redirect validation
+# ============================================================================
+@pytest.mark.asyncio
+async def test_scenario_m_multihop_redirect_validation(uxcam_profile):
+    """
+    Scenario M: Multi-hop redirect validation.
+    Chain: In-scope 1 -> In-scope 2 -> Out-of-scope 3.
+    The client must follow in-scope hops, but halt before the out-of-scope hop,
+    asserting zero mock transport requests are sent to the forbidden hop.
+    """
+    policy = EffectivePolicy.build(profile=uxcam_profile)
+    http_client = NightCrawlerHttpClient(effective_policy=policy)
+
+    dispatched = []
+
+    def mock_get(url, *args, **kwargs):
+        dispatched.append(url)
+        cm = MagicMock()
+        mock_resp = MagicMock()
+        if url == "https://app.uxcam.com/hop1":
+            mock_resp.status = 302
+            mock_resp.headers = {"Location": "https://app.uxcam.com/hop2"}
+        elif url == "https://app.uxcam.com/hop2":
+            mock_resp.status = 302
+            mock_resp.headers = {"Location": "https://evil-destination.com/leak"}
+        else:
+            mock_resp.status = 200
+            mock_resp.text = AsyncMock(return_value="OK")
+            mock_resp.headers = {"content-type": "text/plain"}
+        cm.__aenter__ = AsyncMock(return_value=mock_resp)
+        cm.__aexit__ = AsyncMock(return_value=None)
+        return cm
+
+    mock_session = MagicMock()
+    mock_session.get = MagicMock(side_effect=mock_get)
+
+    status, content, final_url = await http_client.get(mock_session, "https://app.uxcam.com/hop1")
+
+    # Only hop 1 and hop 2 were dispatched; evil-destination.com was blocked before execution!
+    assert dispatched == ["https://app.uxcam.com/hop1", "https://app.uxcam.com/hop2"]
+    assert "https://evil-destination.com/leak" not in dispatched
+    assert status == 302
+
+
+# ============================================================================
+# Scenario N: Cross-origin credential forwarding prevention
+# ============================================================================
+@pytest.mark.asyncio
+async def test_scenario_n_cross_origin_credential_forwarding_prevention(example_profile):
+    """
+    Scenario N: When in-scope target redirects cross-origin (e.g. example.com -> sub.example.com),
+    sensitive credentials (Authorization, Cookie) are stripped, even though both hosts are in scope.
+    """
+    os.environ["EXAMPLE_API_TOKEN"] = "secret-bearer-token-12345"
+    os.environ["RESEARCHER_NAME"] = "researcher-id-007"
+    policy = EffectivePolicy.build(profile=example_profile)
+    http_client = NightCrawlerHttpClient(effective_policy=policy)
+
+    dispatched_headers = {}
+
+    def mock_get(url, *args, **kwargs):
+        dispatched_headers[url] = kwargs.get("headers", {})
+        cm = MagicMock()
+        mock_resp = MagicMock()
+        if "login" in url:
+            mock_resp.status = 302
+            mock_resp.headers = {"Location": "https://other.example.com/callback"}
+        else:
+            mock_resp.status = 200
+            mock_resp.text = AsyncMock(return_value="OK")
+            mock_resp.headers = {"content-type": "text/plain"}
+        cm.__aenter__ = AsyncMock(return_value=mock_resp)
+        cm.__aexit__ = AsyncMock(return_value=None)
+        return cm
+
+    mock_session = MagicMock()
+    mock_session.get = MagicMock(side_effect=mock_get)
+
+    status, _, _ = await http_client.get(
+        mock_session,
+        "https://example.com/login",
+        extra_headers={"Cookie": "session=sensitive-session-id"}
+    )
+
+    # Initial request carried Authorization header and Cookie
+    init_hdrs = dispatched_headers["https://example.com/login"]
+    assert "Authorization" in init_hdrs
+    assert "Bearer secret-bearer-token" in init_hdrs["Authorization"]
+    assert "session=sensitive-session-id" in init_hdrs["Cookie"]
+
+    # Redirected request to https://other.example.com stripped Authorization and Cookie!
+    redir_hdrs = dispatched_headers["https://other.example.com/callback"]
+    assert "Authorization" not in redir_hdrs
+    assert "Cookie" not in redir_hdrs
+    # Researcher header remained attached
+    assert "X-Bug-Bounty" in redir_hdrs
+
+
+# ============================================================================
+# Scenario O: Invalid profile rejection before scanner initialization
+# ============================================================================
+def test_scenario_o_invalid_profile_rejection():
+    """
+    Scenario O: Abort before scanner initialization if profile fails validation.
+    Assert zero mock transport requests made.
+    """
+    invalid_dict = {
+        "id": "invalid-program",
+        "name": "Invalid Program",
+        "version": "1.0.0",
+        "scope": {"allowed_domains": ["example.com"]},
+        "request_policy": {"max_rps": -5.0},  # Invalid negative RPS
+        "testing_permissions": {"fuzzing": True}  # Prohibited fuzzing
+    }
+    with patch("src.core.http_client.aiohttp.ClientSession.get") as mock_get:
+        with pytest.raises(ValueError, match="policy validation"):
+            profile = ProgramProfile.from_dict(invalid_dict)
+            EffectivePolicy.build(profile=profile)
+        assert mock_get.call_count == 0
+
+
+# ============================================================================
+# Scenario P: Empty scope rejection before network activity
+# ============================================================================
+def test_scenario_p_empty_scope_rejection():
+    """
+    Scenario P: Empty scope is rejected before any network activity.
+    Assert zero mock transport requests made.
+    """
+    cfg_empty = NightCrawlerConfig()
+    cfg_empty.allowed_domains = []
+    cfg_empty.scope_enabled = True
+
+    with patch("src.core.http_client.aiohttp.ClientSession.get") as mock_get:
+        with pytest.raises(ValueError, match="Target scope cannot be empty"):
+            EffectivePolicy.build(config=cfg_empty)
+        assert mock_get.call_count == 0
+
+
+# ============================================================================
+# Scenario Q: External tool network-policy bypass prevention
+# ============================================================================
+def test_scenario_q_external_tool_network_policy_bypass_prevention(uxcam_profile):
+    """
+    Scenario Q: Unconstrained network-capable tools cannot bypass policy.
+    ToolCompatibilityManager marks them incompatible, and Scanner never executes them.
+    """
+    tcm = ToolCompatibilityManager(uxcam_profile)
+
+    network_tools = ["katana", "httpx", "hakrawler", "subjs", "getjs"]
+    for t in network_tools:
+        is_compat, reason = tcm.is_tool_compatible(t)
+        assert is_compat is False
+        assert len(reason) > 0
+
+    scanner = NightCrawlerScanner(
+        effective_policy=EffectivePolicy.build(profile=uxcam_profile),
+        use_external_tools=True
+    )
+    assert scanner.tool_compatibility_manager.is_tool_compatible("katana")[0] is False
+    assert scanner.tool_compatibility_manager.is_tool_compatible("subfinder")[0] is True
+
+
+# ============================================================================
+# Scenario R: DNS resolution and prohibited IP destination handling
+# ============================================================================
+@pytest.mark.asyncio
+async def test_scenario_r_prohibited_ip_destination_handling(uxcam_profile):
+    """
+    Scenario R: Destinations resolving to prohibited private/loopback/link-local/internal
+    IP addresses are rejected before sending any HTTP traffic.
+    Assert exactly zero mock transport requests sent.
+    """
+    policy = EffectivePolicy.build(profile=uxcam_profile)
+    http_client = NightCrawlerHttpClient(effective_policy=policy)
+
+    mock_session = MagicMock()
+    mock_session.get = MagicMock()
+
+    # 1. Target directly an internal IP
+    prohibited_targets = [
+        "https://127.0.0.1:8080/admin",
+        "https://169.254.169.254/latest/meta-data/",
+        "https://10.0.0.1/internal",
+        "https://192.168.1.1/router"
+    ]
+    for target in prohibited_targets:
+        status, _, _ = await http_client.get(mock_session, target)
+        assert status is None
+        assert mock_session.get.call_count == 0
+
+    # 2. Hostname that resolves to loopback/private IP
+    with patch.object(http_client, "validate_host_network_safety", return_value=(False, "Resolves to prohibited IP")):
+        status, _, _ = await http_client.get(mock_session, "https://app.uxcam.com/rebinding")
+        assert status is None
+        assert mock_session.get.call_count == 0
+
+
+# ============================================================================
+# Scenario S: Unexpected real network activity causes test failure
+# ============================================================================
+def test_scenario_s_unexpected_real_network_activity_fails():
+    """
+    Scenario S: Verify that any unmocked outbound socket connection causes
+    an immediate test failure due to the security invariant test isolation fixture.
+    """
+    import socket
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    with pytest.raises(RuntimeError, match="TEST SECURITY VIOLATION: Unexpected real network connection"):
+        s.connect(("192.0.2.1", 443))
+
+
+# ============================================================================
+# Scenario T: Consistent selected policy identity across CLI, scanner, HTTP client, and audit log
+# ============================================================================
+def test_scenario_t_consistent_policy_identity(uxcam_profile, example_profile):
+    """
+    Scenario T: Verify identical, consistent policy identity across EffectivePolicy,
+    Scanner, HTTP Client, and AuditLogger.
+    """
+    # UXCam
+    policy_ux = EffectivePolicy.build(profile=uxcam_profile)
+    scanner_ux = NightCrawlerScanner(effective_policy=policy_ux)
+    assert scanner_ux.effective_policy.program_id == "uxcam"
+    assert scanner_ux.http_client.effective_policy.program_id == "uxcam"
+    assert scanner_ux.audit_logger.program_id == "uxcam"
+
+    # Example Program
+    os.environ["EXAMPLE_API_TOKEN"] = "token123"
+    policy_ex = EffectivePolicy.build(profile=example_profile)
+    scanner_ex = NightCrawlerScanner(effective_policy=policy_ex)
+    assert scanner_ex.effective_policy.program_id == "example-program"
+    assert scanner_ex.http_client.effective_policy.program_id == "example-program"
+    assert scanner_ex.audit_logger.program_id == "example-program"
+

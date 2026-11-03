@@ -242,6 +242,11 @@ class EffectivePolicy:
                 if d_str and d_str not in excluded_domains:
                     excluded_domains.append(d_str)
 
+        # Safety Check: Empty scope rejection (Fail-closed policy initialization)
+        if effective_scope_enabled:
+            if not allowed_domains and not allowed_ips and not allowed_cidrs:
+                raise ValueError("Target scope cannot be empty when scope enforcement is enabled.")
+
         # Template / Format
         if overrides.get("template"):
             default_template = str(overrides["template"]).lower()
