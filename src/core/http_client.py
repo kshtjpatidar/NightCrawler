@@ -230,7 +230,7 @@ class NightCrawlerHttpClient:
                         # 200 OK or other final response
                         text_content = None
                         if response.status == 200:
-                            content_type = response.headers.get("content-type", "")
+                            content_type = (response.headers.get("content-type") or response.headers.get("Content-Type") or "").lower()
                             if any(ct in content_type for ct in ("text", "javascript", "json", "xml")):
                                 text_content = await response.text(errors="replace")
 

@@ -56,6 +56,7 @@ class EffectivePolicy:
     crawl_depth: int
     verify_tls: bool
     strict_scope: bool
+    scope_enabled: bool
     default_template: str
     default_format: str
     reporter_name: str
@@ -100,6 +101,7 @@ class EffectivePolicy:
             base_crawl_depth = profile.request_policy.crawl_depth
             base_verify_tls = profile.request_policy.verify_tls
             base_strict_scope = profile.request_policy.strict_scope
+            base_scope_enabled = profile.scope.enabled
 
             allowed_domains = list(profile.scope.allowed_domains)
             excluded_domains = list(profile.scope.excluded_domains)
@@ -135,6 +137,7 @@ class EffectivePolicy:
             base_crawl_depth = cfg.depth
             base_verify_tls = cfg.verify_tls
             base_strict_scope = cfg.strict_scope
+            base_scope_enabled = cfg.scope_enabled
 
             allowed_domains = list(cfg.allowed_domains)
             excluded_domains = list(cfg.excluded_domains)
@@ -195,11 +198,26 @@ class EffectivePolicy:
         else:
             effective_depth = base_crawl_depth
 
-        # Strict Scope
+        # Strict Scope and Scope Enforcement Precedence
         if "strict_scope" in overrides and overrides["strict_scope"] is not None:
-            effective_strict_scope = strict_bool(overrides["strict_scope"], "strict_scope")
+            cli_strict_scope = strict_bool(overrides["strict_scope"], "strict_scope")
         else:
-            effective_strict_scope = base_strict_scope
+            cli_strict_scope = None
+
+        if "scope_enabled" in overrides and overrides["scope_enabled"] is not None:
+            cli_scope_enabled = strict_bool(overrides["scope_enabled"], "scope_enabled")
+        else:
+            cli_scope_enabled = None
+
+        # Safety Check: If program policy requires strict scope, CLI cannot weaken scope enforcement
+        if base_strict_scope:
+            if cli_scope_enabled is False:
+                raise ValueError("Disabling target scope is prohibited when program policy requires strict scope.")
+            effective_strict_scope = cli_strict_scope if cli_strict_scope is not None else base_strict_scope
+            effective_scope_enabled = True
+        else:
+            effective_strict_scope = cli_strict_scope if cli_strict_scope is not None else base_strict_scope
+            effective_scope_enabled = cli_scope_enabled if cli_scope_enabled is not None else base_scope_enabled
 
         # Verify TLS
         if "verify_tls" in overrides and overrides["verify_tls"] is not None:
@@ -246,7 +264,7 @@ class EffectivePolicy:
         scope_manager = ScopeManager(
             allowed_domains=allowed_domains,
             excluded_domains=excluded_domains,
-            enabled=True,
+            enabled=effective_scope_enabled,
             allowed_ips=allowed_ips,
             allowed_cidrs=allowed_cidrs,
             excluded_ips=excluded_ips,
@@ -317,6 +335,7 @@ class EffectivePolicy:
             crawl_depth=effective_depth,
             verify_tls=effective_verify_tls,
             strict_scope=effective_strict_scope,
+            scope_enabled=effective_scope_enabled,
             default_template=default_template,
             default_format=default_format,
             reporter_name=reporter_name,

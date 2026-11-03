@@ -798,12 +798,14 @@ class HtmlReportGenerator:
             if sev in severity_counts:
                 severity_counts[sev] += 1
         
+        target_display = self._escape(getattr(scan_result, 'target', 'Target Assets')) if scan_result else 'Target Assets'
+
         html_content = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>BugCrowd Submission Report - {self._escape(scan_result.target)}</title>
+    <title>BugCrowd Submission Report - {target_display}</title>
     {self._generate_base_css()}
 </head>
 <body>
@@ -815,7 +817,7 @@ class HtmlReportGenerator:
             <div class="meta-grid">
                 <div class="meta-item">
                     <div class="meta-label">Asset</div>
-                    <div class="meta-value">{self._escape(scan_result.target)}</div>
+                    <div class="meta-value">{target_display}</div>
                 </div>
                 <div class="meta-item">
                     <div class="meta-label">Program</div>
@@ -892,7 +894,7 @@ class HtmlReportGenerator:
                 <div class="finding-section">
                     <div class="section-title">Description</div>
                     <div class="section-content">
-                        During passive bug bounty reconnaissance of authorized asset <code>{self._escape(scan_result.target)}</code>, 
+                        During passive bug bounty reconnaissance of authorized asset <code>{target_display}</code>, 
                         a potential credential or token matching the pattern <strong>{self._escape(finding.pattern_name)}</strong> 
                         was identified within client-side JavaScript. 
                         <em>Note: In accordance with responsible disclosure principles, credentials have NOT been validated, tested, or executed against any external APIs.</em>

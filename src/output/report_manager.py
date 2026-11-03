@@ -270,7 +270,7 @@ class ReportManager:
         elif ext in (".md", ".markdown"):
             content = self.generate_markdown(findings, scan_result, tools_report, stats)
             out_file.write_text(content, encoding="utf-8")
-        else:
+        elif ext in (".html", ".htm"):
             # HTML report
             template = self.profile.reporting.default_template if self.profile else "bugcrowd"
             program_name = self.profile.reporting.program_name if self.profile else "Bug Bounty Program"
@@ -281,5 +281,7 @@ class ReportManager:
             )
             html_gen = HtmlReportGenerator(rep_cfg)
             content = html_gen.generate(findings, scan_result, str(out_file))
+        else:
+            raise ValueError(f"Unsupported report output format/extension: '{ext}'. Supported formats: .html, .json, .md")
 
         return str(out_file)

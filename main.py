@@ -193,23 +193,33 @@ def main(ctx, target, target_list, urls, output, concurrency, depth, timeout,
         click.echo(click.style("    TLS certificate verification must remain enabled.\n", fg='yellow'))
         sys.exit(1)
 
+    # Validate report output extension if specified
+    if output:
+        out_ext = Path(output).suffix.lower()
+        if out_ext not in [".html", ".htm", ".json", ".md", ".markdown"]:
+            click.echo(click.style(f"\n[!] ERROR: Unsupported report format '{out_ext}'! Supported formats: .html, .json, .md\n", fg='red', bold=True))
+            sys.exit(1)
+
     # Build Authoritative EffectivePolicy
     cli_overrides = {
-        "concurrency": cfg.concurrency,
-        "depth": cfg.depth,
-        "timeout": cfg.timeout,
-        "max_rps": cfg.max_requests_per_second,
-        "verify_tls": cfg.verify_tls,
-        "strict_scope": cfg.strict_scope,
-        "allowed_domains": cfg.allowed_domains,
-        "excluded_domains": cfg.excluded_domains,
-        "header_name": cfg.header_name,
-        "header_value": cfg.header_value,
-        "template": cfg.default_template,
-        "reporter": cfg.reporter_name,
-        "reporter_email": cfg.reporter_email,
-        "validate_keys": cfg.validate_keys
+        "concurrency": concurrency,
+        "depth": depth,
+        "timeout": timeout,
+        "max_rps": max_rps,
+        "verify_tls": verify_tls,
+        "strict_scope": strict_scope,
+        "scope_enabled": scope_enabled,
+        "allowed_domains": list(allowed_domains) if allowed_domains else None,
+        "excluded_domains": list(excluded_domains) if excluded_domains else None,
+        "header_name": header_name,
+        "header_value": header_value,
+        "template": template,
+        "reporter": reporter,
+        "reporter_email": reporter_email,
+        "validate_keys": validate_keys if validate_keys else None
     }
+    # Filter out None values so EffectivePolicy uses base profile/config values
+    cli_overrides = {k: v for k, v in cli_overrides.items() if v is not None}
 
     try:
         effective_policy = EffectivePolicy.build(
@@ -291,13 +301,22 @@ def main(ctx, target, target_list, urls, output, concurrency, depth, timeout,
             click.echo(click.style("[!] Aborting to ensure bug bounty compliance.\n", fg='red'))
             return
 
-    # Key validation safety check
-    if effective_policy.validate_keys and not quiet:
-        keyhacks_validator = KeyHacksValidator(timeout=validate_timeout)
-        keyhacks_validator.print_disclaimer()
-        if not click.confirm(click.style('[?] Do you confirm you have explicit authorization to validate these secrets?', fg='yellow'), default=False):
-            click.echo(click.style("[!] Key validation cancelled. Running passive recon only.", fg='yellow'))
+    # Key validation safety check: close quiet/non-interactive bypass
+    if effective_policy.validate_keys:
+        if not effective_policy.permission_manager.is_permitted("credential_validation"):
+            if not quiet:
+                click.echo(click.style("[!] POLICY NOTICE: Credential validation is prohibited by program policy. Disabling validation.", fg='yellow'))
             effective_policy.validate_keys = False
+        elif quiet or no_prompt:
+            if not quiet:
+                click.echo(click.style("[!] SAFETY NOTICE: Interactive confirmation is required for active credential validation. Disabling validation in non-interactive mode.", fg='yellow'))
+            effective_policy.validate_keys = False
+        else:
+            keyhacks_validator = KeyHacksValidator(timeout=validate_timeout)
+            keyhacks_validator.print_disclaimer()
+            if not click.confirm(click.style('[?] Do you confirm you have explicit authorization to validate these secrets?', fg='yellow'), default=False):
+                click.echo(click.style("[!] Key validation cancelled. Running passive recon only.", fg='yellow'))
+                effective_policy.validate_keys = False
 
     # Instantiate managers
     header_mgr = cfg.get_header_manager()
