@@ -206,14 +206,18 @@ class NightCrawlerHttpClient:
         except Exception as e:
             return False, f"DNS resolution failed for host '{host}': {e}"
 
-    async def get(
+    async def request(
         self,
         session: aiohttp.ClientSession,
+        method: str,
         url: str,
-        extra_headers: Optional[Dict[str, str]] = None
+        extra_headers: Optional[Dict[str, str]] = None,
+        data: Optional[Any] = None,
+        json_data: Optional[Any] = None,
+        auth: Optional[aiohttp.BasicAuth] = None
     ) -> Tuple[Optional[int], Optional[str], Optional[str]]:
         """
-        Execute an HTTP GET request with hop-by-hop redirect verification.
+        Execute an HTTP request (GET, POST, etc.) with hop-by-hop redirect verification.
         Every actual attempt (initial, retry, redirect) consumes a rate limit token.
         Guarantees that every network request uses the RequestPolicyManager semaphore.
         Returns: (status_code, content_text, final_url)
@@ -223,22 +227,59 @@ class NightCrawlerHttpClient:
             async with sem:
                 token = _in_concurrency_scope.set(True)
                 try:
-                    return await self._get_impl(session, url, extra_headers)
+                    return await self._request_impl(session, method, url, extra_headers, data, json_data, auth)
                 finally:
                     _in_concurrency_scope.reset(token)
         else:
-            return await self._get_impl(session, url, extra_headers)
+            return await self._request_impl(session, method, url, extra_headers, data, json_data, auth)
 
-    async def _get_impl(
+    async def get(
         self,
         session: aiohttp.ClientSession,
         url: str,
         extra_headers: Optional[Dict[str, str]] = None
     ) -> Tuple[Optional[int], Optional[str], Optional[str]]:
+        """Execute an HTTP GET request under shared policy controls."""
+        return await self.request(session, "GET", url, extra_headers=extra_headers)
+
+    async def post(
+        self,
+        session: aiohttp.ClientSession,
+        url: str,
+        extra_headers: Optional[Dict[str, str]] = None,
+        data: Optional[Any] = None,
+        json_data: Optional[Any] = None,
+        auth: Optional[aiohttp.BasicAuth] = None
+    ) -> Tuple[Optional[int], Optional[str], Optional[str]]:
+        """Execute an HTTP POST request under shared policy controls."""
+        return await self.request(session, "POST", url, extra_headers=extra_headers, data=data, json_data=json_data, auth=auth)
+
+    async def _request_impl(
+        self,
+        session: aiohttp.ClientSession,
+        method: str,
+        url: str,
+        extra_headers: Optional[Dict[str, str]] = None,
+        data: Optional[Any] = None,
+        json_data: Optional[Any] = None,
+        auth: Optional[aiohttp.BasicAuth] = None
+    ) -> Tuple[Optional[int], Optional[str], Optional[str]]:
         initial_url = url.strip()
         current_url = initial_url
+        current_method = method.upper()
+        current_data = data
+        current_json = json_data
+        current_auth = auth
 
         parsed_init = urlparse(initial_url)
+        if parsed_init.scheme not in ("http", "https"):
+            logger.warning(f"[Security] Unsupported URL scheme '{parsed_init.scheme}' in {initial_url}")
+            return None, None, None
+
+        if parsed_init.username or parsed_init.password:
+            logger.warning(f"[Security] Prohibited embedded credentials in URL: {initial_url}")
+            return None, None, None
+
         initial_origin = f"{parsed_init.scheme}://{parsed_init.hostname}:{parsed_init.port or (443 if parsed_init.scheme == 'https' else 80)}"
 
         # Step 1: Pre-request Scope Check
@@ -248,7 +289,7 @@ class NightCrawlerHttpClient:
                 host = self.scope_manager.extract_hostname(current_url) or "unknown"
                 self.audit_logger.log_event(
                     target_host=host,
-                    method="GET",
+                    method=current_method,
                     url=current_url,
                     scope_decision="BLOCKED",
                     policy_decision="DENIED",
@@ -257,25 +298,40 @@ class NightCrawlerHttpClient:
             return None, None, None
 
         redirect_count = 0
+        redirect_history = {current_url}
 
         while redirect_count <= self.max_redirects:
             parsed_curr = urlparse(current_url)
             curr_origin = f"{parsed_curr.scheme}://{parsed_curr.hostname}:{parsed_curr.port or (443 if parsed_curr.scheme == 'https' else 80)}"
             is_cross_origin = (redirect_count > 0 and curr_origin != initial_origin)
 
+            # Sanitize extra_headers on cross-origin redirects: strip sensitive auth tokens and basic auth
+            active_extra_headers = dict(extra_headers or {})
+            active_auth = current_auth
+            if is_cross_origin:
+                sensitive_keys = {
+                    "authorization", "proxy-authorization", "cookie",
+                    "x-api-key", "api-key", "token", "x-auth-token", "x-user-token"
+                }
+                active_extra_headers = {
+                    k: v for k, v in active_extra_headers.items()
+                    if k.lower() not in sensitive_keys
+                }
+                active_auth = None
+
             # Build headers (credentials only attached if current_url is in-scope and not cross-origin)
             if self.auth_manager:
                 headers = self.auth_manager.get_headers_for_url(
                     current_url,
                     scope_manager=self.scope_manager,
-                    base_headers=extra_headers,
+                    base_headers=active_extra_headers,
                     is_cross_origin=is_cross_origin
                 )
             else:
                 headers = self.header_manager.get_headers_for_url(
                     current_url,
                     scope_manager=self.scope_manager,
-                    base_headers=extra_headers
+                    base_headers=active_extra_headers
                 )
 
             # Retry loop: every attempt consumes a rate-limit token
@@ -288,7 +344,7 @@ class NightCrawlerHttpClient:
                         host = self.scope_manager.extract_hostname(current_url) or "unknown"
                         self.audit_logger.log_event(
                             target_host=host,
-                            method="GET",
+                            method=current_method,
                             url=current_url,
                             scope_decision="BLOCKED",
                             policy_decision="DENIED"
@@ -303,7 +359,7 @@ class NightCrawlerHttpClient:
                     if self.audit_logger:
                         self.audit_logger.log_event(
                             target_host=host or "unknown",
-                            method="GET",
+                            method=current_method,
                             url=current_url,
                             scope_decision="BLOCKED",
                             policy_decision="DENIED",
@@ -319,17 +375,41 @@ class NightCrawlerHttpClient:
                     await self.rate_limiter.acquire()
 
                 try:
-                    async with session.get(
-                        current_url,
-                        headers=headers,
-                        ssl=self.ssl_context,
-                        allow_redirects=False
-                    ) as response:
+                    if current_method == "GET" and hasattr(session, "get"):
+                        req_ctx = session.get(
+                            current_url,
+                            headers=headers,
+                            auth=active_auth,
+                            ssl=self.ssl_context,
+                            allow_redirects=False
+                        )
+                    elif current_method == "POST" and hasattr(session, "post"):
+                        req_ctx = session.post(
+                            current_url,
+                            headers=headers,
+                            data=current_data,
+                            json=current_json,
+                            auth=active_auth,
+                            ssl=self.ssl_context,
+                            allow_redirects=False
+                        )
+                    else:
+                        req_ctx = session.request(
+                            method=current_method,
+                            url=current_url,
+                            headers=headers,
+                            data=current_data,
+                            json=current_json,
+                            auth=active_auth,
+                            ssl=self.ssl_context,
+                            allow_redirects=False
+                        )
+                    async with req_ctx as response:
                         # Log audit event
                         if self.audit_logger:
                             self.audit_logger.log_event(
                                 target_host=host or "unknown",
-                                method="GET",
+                                method=current_method,
                                 url=current_url,
                                 scope_decision="ALLOWED",
                                 policy_decision="PERMITTED",
@@ -346,6 +426,38 @@ class NightCrawlerHttpClient:
                                 return response.status, None, current_url
 
                             next_url = urljoin(current_url, location)
+                            parsed_next = urlparse(next_url)
+
+                            # Validate scheme support
+                            if parsed_next.scheme not in ("http", "https"):
+                                logger.warning(f"[Security] Unsupported scheme in redirect destination: {next_url}")
+                                return response.status, None, current_url
+
+                            # Prohibit credentials in redirect URL
+                            if parsed_next.username or parsed_next.password:
+                                logger.warning(f"[Security] Credentials in redirect destination prohibited: {next_url}")
+                                return response.status, None, current_url
+
+                            # Reject HTTPS to HTTP downgrade in strict or TLS-verified mode
+                            if parsed_curr.scheme == "https" and parsed_next.scheme == "http" and (self.strict_mode or self.verify_tls):
+                                logger.warning(f"[Security] HTTPS-to-HTTP downgrade rejected for redirect {current_url} -> {next_url}")
+                                if self.audit_logger:
+                                    next_host = self.scope_manager.extract_hostname(next_url) or "unknown"
+                                    self.audit_logger.log_event(
+                                        target_host=next_host,
+                                        method=current_method,
+                                        url=next_url,
+                                        scope_decision="BLOCKED",
+                                        policy_decision="DENIED",
+                                        redirect_decision="BLOCKED_SCHEME_DOWNGRADE"
+                                    )
+                                return response.status, None, current_url
+
+                            # Detect redirect loop
+                            if next_url in redirect_history:
+                                logger.warning(f"[HTTP] Redirect loop detected for {next_url}")
+                                return response.status, None, current_url
+                            redirect_history.add(next_url)
 
                             # Validate redirect target scope immediately
                             if not self.scope_manager.is_url_in_scope(next_url):
@@ -357,13 +469,19 @@ class NightCrawlerHttpClient:
                                     next_host = self.scope_manager.extract_hostname(next_url) or "unknown"
                                     self.audit_logger.log_event(
                                         target_host=next_host,
-                                        method="GET",
+                                        method=current_method,
                                         url=next_url,
                                         scope_decision="BLOCKED",
                                         policy_decision="DENIED",
                                         redirect_decision="BLOCKED_OUT_OF_SCOPE"
                                     )
                                 return response.status, None, current_url
+
+                            # Method and payload adjustment on 301, 302, 303
+                            if response.status == 303 or (response.status in (301, 302) and current_method == "POST"):
+                                current_method = "GET"
+                                current_data = None
+                                current_json = None
 
                             # Proceed to next hop
                             current_url = next_url
@@ -381,13 +499,8 @@ class NightCrawlerHttpClient:
                             await asyncio.sleep(backoff)
                             continue
 
-                        # 200 OK or other final response
-                        text_content = None
-                        if response.status == 200:
-                            content_type = (response.headers.get("content-type") or response.headers.get("Content-Type") or "").lower()
-                            if any(ct in content_type for ct in ("text", "javascript", "json", "xml")):
-                                text_content = await response.text(errors="replace")
-
+                        # Response text read for caller analysis
+                        text_content = await response.text(errors="replace")
                         return response.status, text_content, current_url
 
                 except (aiohttp.ClientSSLError, ssl.SSLError) as ssl_err:

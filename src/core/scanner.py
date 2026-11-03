@@ -222,6 +222,17 @@ class NightCrawlerScanner:
             audit_logger=self.audit_logger
         )
 
+        # KeyHacks validator wired with full policy dependencies
+        from src.validators.keyhacks import KeyHacksValidator
+        self.keyhacks_validator = KeyHacksValidator(
+            effective_policy=self.effective_policy,
+            http_client=self.http_client,
+            request_policy_manager=self.request_policy_manager,
+            scope_manager=self.scope_manager,
+            timeout=self.timeout_seconds,
+            verify_ssl=self.verify_tls
+        )
+
         # Endpoint extractor
         self.endpoint_extractor = EndpointExtractor(scope_manager=self.scope_manager)
         

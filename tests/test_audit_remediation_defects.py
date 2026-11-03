@@ -828,7 +828,9 @@ async def test_keyhacks_validator_enforces_shared_semaphore_and_scope():
 
     rpm = RequestPolicyManager(concurrency_limit=1, max_rps=50.0)
     scope = ScopeManager(allowed_domains=["example.com"], enabled=True)
-    validator = KeyHacksValidator(request_policy_manager=rpm, scope_manager=scope)
+    client = NightCrawlerHttpClient(scope_manager=scope, request_policy_manager=rpm)
+    client._pinned_ips["example.com"] = ["93.184.216.34"]
+    validator = KeyHacksValidator(request_policy_manager=rpm, scope_manager=scope, http_client=client)
 
     # 1. Out-of-scope validation URL fails closed
     fake_cfg = {

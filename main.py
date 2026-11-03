@@ -315,10 +315,9 @@ def main(ctx, target, target_list, urls, output, concurrency, depth, timeout,
                 click.echo(click.style("[!] SAFETY NOTICE: Interactive confirmation is required for active credential validation. Disabling validation in non-interactive mode.", fg='yellow'))
             effective_policy.validate_keys = False
         else:
-            keyhacks_validator = KeyHacksValidator(
-                timeout=validate_timeout,
-                request_policy_manager=effective_policy.request_policy_manager,
-                scope_manager=scope_mgr
+            keyhacks_validator = KeyHacksValidator.from_policy(
+                effective_policy=effective_policy,
+                timeout=validate_timeout
             )
             keyhacks_validator.print_disclaimer()
             if not click.confirm(click.style('[?] Do you confirm you have explicit authorization to validate these secrets?', fg='yellow'), default=False):

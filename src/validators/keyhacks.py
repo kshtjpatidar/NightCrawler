@@ -25,7 +25,14 @@ from dataclasses import dataclass
 from enum import Enum
 from rich.console import Console
 
+from src.core.http_client import _in_concurrency_scope
+
 console = Console()
+
+
+class KeyHacksPolicyError(ValueError):
+    """Raised when mandatory policy dependencies are missing or violated in KeyHacksValidator."""
+    pass
 
 
 class ValidationStatus(Enum):
@@ -969,18 +976,63 @@ class KeyHacksValidator:
     
     def __init__(
         self,
-        timeout: int = 10,
-        verify_ssl: bool = False,
+        effective_policy: Optional[Any] = None,
+        http_client: Optional[Any] = None,
         request_policy_manager: Optional[Any] = None,
-        scope_manager: Optional[Any] = None
+        scope_manager: Optional[Any] = None,
+        timeout: int = 10,
+        verify_ssl: bool = False
     ):
+        # Support legacy positional signatures, e.g. KeyHacksValidator(timeout=10, verify_ssl=False)
+        if isinstance(effective_policy, (int, float)):
+            timeout = int(effective_policy)
+            effective_policy = None
+
+        if effective_policy is not None:
+            self.effective_policy = effective_policy
+            self.scope_manager = scope_manager or getattr(effective_policy, "scope_manager", None)
+            self.request_policy_manager = request_policy_manager or getattr(effective_policy, "request_policy_manager", None)
+            self.http_client = http_client or getattr(effective_policy, "http_client", None)
+            self.verify_ssl = getattr(effective_policy, "verify_tls", verify_ssl)
+        else:
+            self.effective_policy = None
+            self.scope_manager = scope_manager
+            self.request_policy_manager = request_policy_manager
+            self.http_client = http_client
+            self.verify_ssl = verify_ssl
+
         self.timeout = aiohttp.ClientTimeout(total=timeout)
-        self.verify_ssl = verify_ssl
-        self.request_policy_manager = request_policy_manager
-        self.scope_manager = scope_manager
         self.validated_count = 0
         self.valid_secrets = []
-    
+
+    @classmethod
+    def from_policy(cls, effective_policy: Any, timeout: int = 10) -> "KeyHacksValidator":
+        """Construct a KeyHacksValidator wired with all mandatory policy dependencies from an EffectivePolicy."""
+        return cls(
+            effective_policy=effective_policy,
+            http_client=getattr(effective_policy, "http_client", None),
+            request_policy_manager=getattr(effective_policy, "request_policy_manager", None),
+            scope_manager=getattr(effective_policy, "scope_manager", None),
+            timeout=timeout,
+            verify_ssl=getattr(effective_policy, "verify_tls", False)
+        )
+
+    def validate_policy_dependencies(self) -> None:
+        """
+        Validate all mandatory policy dependencies are present and valid before network activity.
+        Fails closed with KeyHacksPolicyError if any dependency is missing or misconfigured.
+        """
+        if self.scope_manager is None:
+            raise KeyHacksPolicyError("ScopeManager is missing: active HTTP validation requires an authorized ScopeManager.")
+        if self.request_policy_manager is None:
+            raise KeyHacksPolicyError("RequestPolicyManager is missing: active HTTP validation requires a RequestPolicyManager.")
+        if self.http_client is None:
+            raise KeyHacksPolicyError("HttpClient is missing: active HTTP validation requires NightCrawlerHttpClient.")
+        if not hasattr(self.http_client, "get_resolver") or self.http_client.get_resolver() is None:
+            raise KeyHacksPolicyError("DNS Resolver is missing: active HTTP validation requires a PolicyAwareResolver.")
+        if not hasattr(self.request_policy_manager, "global_limiter") or self.request_policy_manager.global_limiter is None:
+            raise KeyHacksPolicyError("RateLimiter is missing: active HTTP validation requires a GlobalRateLimiter.")
+
     def print_disclaimer(self):
         """Print ethical use disclaimer"""
         console.print(self.DISCLAIMER, style="bold yellow")
@@ -999,38 +1051,57 @@ class KeyHacksValidator:
         return None
     
     async def validate_http(self, validator: Dict, secret: str, extra_params: Dict = None) -> ValidationResult:
-        """Validate secret using HTTP request under shared concurrency and scope policy"""
+        """Validate secret using HTTP request under shared concurrency, scope, DNS, and rate-limiting policy"""
+        # Phase 2: Fail-closed dependency validation before any network activity
+        self.validate_policy_dependencies()
+
         try:
             url = validator["url"].format(key=secret, **(extra_params or {}))
             method = validator.get("method", "GET").upper()
 
-            if self.scope_manager and not self.scope_manager.is_url_in_scope(url):
+            # Phase 3.A: Scope enforcement on target URL
+            if not self.scope_manager.is_url_in_scope(url):
                 return ValidationResult(
                     status=ValidationStatus.ERROR,
                     message="Target validation URL is out of scope",
                     validation_command=f"curl -X {method} '{url}'"
                 )
 
-            sem = self.request_policy_manager.get_semaphore() if self.request_policy_manager else None
-            if sem:
+            # Phase 3.C: Shared Concurrency Semaphore enforcement
+            sem = self.request_policy_manager.get_semaphore()
+            if not _in_concurrency_scope.get():
                 async with sem:
-                    return await self._do_validate_http(validator, secret, extra_params, url, method)
+                    token = _in_concurrency_scope.set(True)
+                    try:
+                        return await self._do_validate_http(validator, secret, extra_params, url, method)
+                    finally:
+                        _in_concurrency_scope.reset(token)
             else:
                 return await self._do_validate_http(validator, secret, extra_params, url, method)
+
         except asyncio.TimeoutError:
             return ValidationResult(
                 status=ValidationStatus.UNKNOWN,
                 message="Request timed out",
-                validation_command=f"curl -X {method} '{url}'"
+                validation_command=f"curl -X {method} '{url}'" if 'url' in locals() and 'method' in locals() else None
             )
+        except KeyHacksPolicyError:
+            raise
         except Exception as e:
             return ValidationResult(
                 status=ValidationStatus.ERROR,
                 message=f"Validation error: {str(e)[:100]}",
-                validation_command=f"curl -X {method} '{url}'"
+                validation_command=f"curl -X {method} '{url}'" if 'url' in locals() and 'method' in locals() else None
             )
 
-    async def _do_validate_http(self, validator: Dict, secret: str, extra_params: Dict, url: str, method: str) -> ValidationResult:
+    async def _do_validate_http(
+        self,
+        validator: Dict,
+        secret: str,
+        extra_params: Optional[Dict],
+        url: str,
+        method: str
+    ) -> ValidationResult:
         headers = {}
         
         # Build headers
@@ -1054,16 +1125,38 @@ class KeyHacksValidator:
         data = None
         if "data" in validator:
             data = {k: v.format(key=secret) for k, v in validator["data"].items()}
-        
-        async with aiohttp.ClientSession(timeout=self.timeout) as session:
-            if method == "GET":
-                async with session.get(url, headers=headers, auth=auth, ssl=self.verify_ssl) as resp:
-                    response_text = await resp.text()
-                    return self._analyze_response(validator, response_text, resp.status, url)
-            elif method == "POST":
-                async with session.post(url, headers=headers, auth=auth, data=body or data, ssl=self.verify_ssl) as resp:
-                    response_text = await resp.text()
-                    return self._analyze_response(validator, response_text, resp.status, url)
+
+        payload = body or data
+
+        # Always construct session using policy-aware resolver to pin validated DNS answers & enforce IP safety
+        resolver = self.http_client.get_resolver()
+        connector = aiohttp.TCPConnector(resolver=resolver, ssl=self.verify_ssl)
+
+        async with aiohttp.ClientSession(connector=connector, timeout=self.timeout) as session:
+            status, content, final_url = await self.http_client.request(
+                session=session,
+                method=method,
+                url=url,
+                extra_headers=headers,
+                data=payload,
+                auth=auth
+            )
+
+        if status is None:
+            return ValidationResult(
+                status=ValidationStatus.ERROR,
+                message="HTTP request blocked by policy or network safety controls",
+                validation_command=f"curl -X {method} '{url}'"
+            )
+
+        if status in (301, 302, 303, 307, 308) and not content:
+            return ValidationResult(
+                status=ValidationStatus.ERROR,
+                message="Redirect was blocked by scope or security policy",
+                validation_command=f"curl -X {method} '{url}'"
+            )
+
+        return self._analyze_response(validator, content or "", status, final_url or url)
     
     def _analyze_response(self, validator: Dict, response: str, status_code: int, url: str) -> ValidationResult:
         """Analyze HTTP response to determine validity"""
@@ -1148,7 +1241,14 @@ class KeyHacksValidator:
         
         # Validate based on type
         if validator.get("type") == "http":
-            result = await self.validate_http(validator, secret_value, extra_params)
+            try:
+                result = await self.validate_http(validator, secret_value, extra_params)
+            except KeyHacksPolicyError as pe:
+                result = ValidationResult(
+                    status=ValidationStatus.ERROR,
+                    message=f"Policy dependency missing: {pe}",
+                    validation_command=validator.get("description", "Manual validation required")
+                )
         elif validator.get("type") == "command":
             result = ValidationResult(
                 status=ValidationStatus.UNKNOWN,
@@ -1197,7 +1297,15 @@ class KeyHacksValidator:
 
 
 # Convenience function for quick validation
-async def validate_key(pattern_name: str, secret_value: str) -> ValidationResult:
-    """Quick validation of a single key"""
-    validator = KeyHacksValidator()
+async def validate_key(
+    pattern_name: str,
+    secret_value: str,
+    effective_policy: Optional[Any] = None,
+    **kwargs
+) -> ValidationResult:
+    """Quick validation of a single key under policy controls"""
+    if effective_policy is not None:
+        validator = KeyHacksValidator.from_policy(effective_policy, **kwargs)
+    else:
+        validator = KeyHacksValidator(**kwargs)
     return await validator.validate_secret(pattern_name, secret_value)
