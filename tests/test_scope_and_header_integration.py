@@ -44,9 +44,10 @@ def test_default_invocation_enforces_scope():
     res_excluded = runner.invoke(main, ["-t", "tara.uxcam.com", "--no-prompt"])
     assert "ERROR: Target 'tara.uxcam.com' is OUT OF SCOPE!" in res_excluded.output
 
-    # 3. Disabling strict compliance mode (--no-strict-scope) does NOT disable scope enforcement
+    # 3. Attempting to disable strict compliance mode (--no-strict-scope) is rejected when profile requires strict scope
     res_no_strict = runner.invoke(main, ["-t", "eviluxcam.com", "--no-strict-scope", "--no-prompt"])
-    assert "ERROR: Target 'eviluxcam.com' is OUT OF SCOPE!" in res_no_strict.output
+    assert res_no_strict.exit_code != 0
+    assert "Disabling strict scope is prohibited" in res_no_strict.output
 
 
 def test_reject_non_positive_rps_and_enforce_uxcam_max():

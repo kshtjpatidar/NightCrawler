@@ -1,6 +1,6 @@
 """
 NightCrawler - Audit Remediation Regression Test Suite
-Proves remediation of all 10 verified audit findings:
+Proves remediation of all verified audit findings and policy precedence guarantees:
 1. Immutable profile scope: CLI --allowed-domain cannot expand profile scope, only narrow.
 2. DNS safety: DNS resolution failures and mixed/prohibited answers fail closed; DNS rebinding prevented via IP pinning.
 3. ReportManager integration: constructor accepts policy, generates HTML, JSON, Markdown through CLI.
@@ -11,6 +11,11 @@ Proves remediation of all 10 verified audit findings:
 8. Authentication ordering: Mandatory credentials validated before constructing scanner or external tool processes.
 9. Concurrency: Centralized semaphore from RequestPolicyManager governs HTTP execution.
 10. Configuration parsing: Strict boolean and numeric parsing; malformed YAML and missing files fail explicitly.
+11. Mandatory strict scope: CLI --no-strict-scope cannot weaken profile strict_scope; fails closed.
+12. Concurrency ceiling: CLI concurrency capped to profile maximum across all profiles (1, 2, 5).
+13. End-to-end DNS pinning with TCPConnector and PolicyAwareResolver.
+14. End-to-end scanner orchestration proving prohibited tools are never invoked via subprocess.
+15. End-to-end CLI authentication abort proving zero scanner construction and zero transport requests.
 """
 
 import os
@@ -20,6 +25,7 @@ import pytest
 import asyncio
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
+import aiohttp
 from click.testing import CliRunner
 
 from main import main
@@ -75,7 +81,6 @@ def test_cli_can_narrow_profile_scope(example_profile):
     )
     assert policy.scope_manager.allowed_domains == {"sub.example.com"}
     assert policy.scope_manager.is_host_allowed("sub.example.com") is True
-    # Other domains from profile are no longer in the narrowed scope
     assert policy.scope_manager.is_host_allowed("other.example.com") is False
 
 
@@ -101,7 +106,6 @@ async def test_dns_mixed_public_and_prohibited_answers_fails_closed():
     scope = ScopeManager(allowed_domains=["example.com"], enabled=True)
     client = NightCrawlerHttpClient(scope_manager=scope)
 
-    # Mixed response: public IP followed by loopback/cloud metadata IP
     mock_addrinfo = [
         (socket.AF_INET, socket.SOCK_STREAM, 6, '', ('93.184.216.34', 443)),
         (socket.AF_INET, socket.SOCK_STREAM, 6, '', ('127.0.0.1', 443)),
@@ -141,7 +145,6 @@ async def test_dns_pinning_prevents_rebinding():
     client = NightCrawlerHttpClient(scope_manager=scope)
     resolver = client.get_resolver()
 
-    # Initial lookup returns safe public IP
     initial_addrinfo = [
         (socket.AF_INET, socket.SOCK_STREAM, 6, '', ('93.184.216.34', 443)),
     ]
@@ -157,25 +160,72 @@ async def test_dns_pinning_prevents_rebinding():
         (socket.AF_INET, socket.SOCK_STREAM, 6, '', ('127.0.0.1', 443)),
     ]
 
-    # Resolver uses pinned cache, never queries rebounded IP
     with patch.object(loop, "getaddrinfo", return_value=rebound_addrinfo):
         res2 = await resolver.resolve("rebind.example.com", port=443)
         assert len(res2) == 1
         assert res2[0]["host"] == "93.184.216.34"  # Pinned IP preserved!
 
 
+@pytest.mark.asyncio
+async def test_tcp_connector_uses_policy_aware_resolver_and_pins_ip():
+    """
+    Strengthened DNS Pinning:
+    Prove that an actual aiohttp.TCPConnector configured with PolicyAwareResolver:
+    1. Uses the PolicyAwareResolver instance.
+    2. Pins the validated IP on initial connection resolution.
+    3. Rejects subsequent DNS rebinding (DNS returning 127.0.0.1) by reusing the pinned IP.
+    4. Prohibited destinations raise OSError before any transport socket connection is made.
+    """
+    scope = ScopeManager(allowed_domains=["rebind.example.com", "prohibited.example.com"], enabled=True)
+    client = NightCrawlerHttpClient(scope_manager=scope)
+    resolver = client.get_resolver()
+
+    connector = aiohttp.TCPConnector(resolver=resolver)
+    assert connector._resolver is resolver
+
+    loop = asyncio.get_running_loop()
+
+    # Step 1: Initial resolution returns safe public IP
+    initial_addrinfo = [
+        (socket.AF_INET, socket.SOCK_STREAM, 6, '', ('93.184.216.34', 443)),
+    ]
+    with patch.object(loop, "getaddrinfo", return_value=initial_addrinfo):
+        hosts1 = await connector._resolve_host("rebind.example.com", 443)
+        assert len(hosts1) >= 1
+        assert hosts1[0]["host"] == "93.184.216.34"
+
+    # Step 2: Attacker changes DNS record to private/loopback IP (DNS Rebinding attempt)
+    rebound_addrinfo = [
+        (socket.AF_INET, socket.SOCK_STREAM, 6, '', ('127.0.0.1', 443)),
+    ]
+    with patch.object(loop, "getaddrinfo", return_value=rebound_addrinfo):
+        hosts2 = await connector._resolve_host("rebind.example.com", 443)
+        assert len(hosts2) >= 1
+        assert hosts2[0]["host"] == "93.184.216.34"  # Resolves to pinned IP, NOT 127.0.0.1!
+
+    # Step 3: Prohibited destination resolving to 169.254.169.254 fails closed
+    prohibited_addrinfo = [
+        (socket.AF_INET, socket.SOCK_STREAM, 6, '', ('169.254.169.254', 443)),
+    ]
+    with patch.object(loop, "getaddrinfo", return_value=prohibited_addrinfo):
+        with pytest.raises(OSError) as excinfo:
+            await connector._resolve_host("prohibited.example.com", 443)
+        assert "blocked by network policy" in str(excinfo.value)
+
+    await connector.close()
+
+
 # ============================================================================
 # Defect 3: ReportManager Integration
 # ============================================================================
-def test_report_manager_policy_constructor_and_formats(tmp_path, example_profile):
+def test_report_manager_policy_constructor_and_formats(tmp_path, example_profile, monkeypatch):
     """ReportManager constructor cleanly accepts policy and generates JSON, Markdown, and HTML."""
-    os.environ["EXAMPLE_API_TOKEN"] = "token123"
+    monkeypatch.setenv("EXAMPLE_API_TOKEN", "token123")
     policy = EffectivePolicy.build(
         profile=example_profile,
         cli_overrides={"reporter": "Alice Auditor"}
     )
 
-    # 1. Constructor invocation with policy=effective_policy
     rm = ReportManager(policy=policy)
     assert rm.reporter_name == "Alice Auditor"
     assert rm.policy == policy
@@ -201,7 +251,6 @@ def test_report_manager_policy_constructor_and_formats(tmp_path, example_profile
     assert data["program_metadata"]["reporter_name"] == "Alice Auditor"
     assert data["program_metadata"]["program_id"] == "example-program"
     assert len(data["findings"]) == 1
-    # Secret is masked in report
     assert data["findings"][0]["evidence"]["masked_secret"] != "AKIAIOSFODNN7EXAMPLE"
 
     # Generate Markdown
@@ -228,19 +277,16 @@ def test_cli_report_generation_formats(tmp_path):
 
     runner = CliRunner()
 
-    # JSON report
     json_out = tmp_path / "out.json"
     r_json = runner.invoke(main, ["--offline", str(js_dir), "-o", str(json_out), "--quiet"])
     assert r_json.exit_code == 0
     assert json_out.exists()
 
-    # Markdown report
     md_out = tmp_path / "out.md"
     r_md = runner.invoke(main, ["--offline", str(js_dir), "-o", str(md_out), "--quiet"])
     assert r_md.exit_code == 0
     assert md_out.exists()
 
-    # HTML report
     html_out = tmp_path / "out.html"
     r_html = runner.invoke(main, ["--offline", str(js_dir), "-o", str(html_out), "--quiet"])
     assert r_html.exit_code == 0
@@ -284,7 +330,6 @@ def test_review_required_profile_proceeds_with_confirmation():
         requires_review=True,
         review_notes=["Ambiguous rate limit clause in policy text"]
     )
-    prof.scope.allowed_domains = ["example.com"]
     prof.scope.allowed_domains = ["example.com"]
 
     policy = EffectivePolicy.build(
@@ -331,7 +376,7 @@ def test_tool_restrictions_allowlist_and_denylist():
 
 
 # ============================================================================
-# Defect 7: External Tools Without Profile
+# Defect 7: External Tools Without Profile & Orchestration Blocking
 # ============================================================================
 def test_external_tools_without_profile_blocks_network_tools():
     """When tool compatibility manager is missing (no profile), network-capable tools are blocked."""
@@ -341,24 +386,66 @@ def test_external_tools_without_profile_blocks_network_tools():
     )
     assert scanner.tool_compatibility_manager is None
 
-    # Offline tool jsluice can run
     cap_js = ToolCompatibilityManager.TOOL_REGISTRY["jsluice"]
     assert cap_js.makes_live_requests is False
 
-    # Active network tools are blocked
     for t_name in ["katana", "hakrawler", "subjs", "getjs", "httpx"]:
         cap = ToolCompatibilityManager.TOOL_REGISTRY[t_name]
         assert cap.makes_live_requests is True
 
 
+@pytest.mark.asyncio
+async def test_scanner_orchestration_blocks_prohibited_tools_from_subprocess(example_profile, monkeypatch):
+    """
+    Strengthened External Tools:
+    Invoke real scanner orchestration (scan_target) with mocked subprocess.run.
+    Verify that prohibited network-capable tools (katana, hakrawler, subjs, getjs) are NEVER executed.
+    """
+    monkeypatch.setenv("EXAMPLE_API_TOKEN", "valid-token-123")
+    policy = EffectivePolicy.build(profile=example_profile)
+    scanner = NightCrawlerScanner(effective_policy=policy, use_external_tools=True)
+
+    executed_commands = []
+    def mock_subprocess_run(cmd, *args, **kwargs):
+        cmd_str = " ".join(cmd) if isinstance(cmd, list) else str(cmd)
+        executed_commands.append(cmd_str)
+        m = MagicMock()
+        m.returncode = 0
+        m.stdout = ""
+        return m
+
+    mock_resp = MagicMock()
+    mock_resp.status = 200
+    mock_resp.text = AsyncMock(return_value="<html><body>OK</body></html>")
+    mock_resp.headers = {"content-type": "text/html"}
+
+    mock_session = MagicMock()
+    cm = MagicMock()
+    cm.__aenter__ = AsyncMock(return_value=mock_resp)
+    cm.__aexit__ = AsyncMock(return_value=None)
+    mock_session.get.return_value = cm
+    mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+    mock_session.__aexit__ = AsyncMock(return_value=None)
+
+    with patch("subprocess.run", side_effect=mock_subprocess_run), \
+         patch("aiohttp.ClientSession", return_value=mock_session):
+        await scanner.scan_target("https://example.com")
+
+    # Prohibited tools must never appear in executed subprocess commands
+    for prohibited_tool in ["katana", "hakrawler", "subjs", "getjs"]:
+        for executed in executed_commands:
+            assert prohibited_tool not in executed.lower(), (
+                f"Security violation: Prohibited tool '{prohibited_tool}' was executed via subprocess: {executed}"
+            )
+
+
 # ============================================================================
-# Defect 8: Authentication Ordering
+# Defect 8: Authentication Ordering & Real CLI Entry Point
 # ============================================================================
-def test_authentication_ordering_missing_credentials_fails_before_scanner(example_profile):
+def test_authentication_ordering_missing_credentials_fails_before_scanner(example_profile, monkeypatch):
     """Missing mandatory authentication credentials raises ValueError before any outbound requests."""
-    # Ensure env token is missing
-    os.environ.pop("EXAMPLE_API_TOKEN", None)
-    os.environ.pop("RESEARCHER_NAME", None)
+    monkeypatch.delenv("EXAMPLE_API_TOKEN", raising=False)
+    monkeypatch.delenv("RESEARCHER_NAME", raising=False)
 
     policy = EffectivePolicy.build(profile=example_profile)
     with pytest.raises(ValueError) as excinfo:
@@ -366,8 +453,44 @@ def test_authentication_ordering_missing_credentials_fails_before_scanner(exampl
     assert "Mandatory authentication credentials missing" in str(excinfo.value)
 
 
+def test_cli_missing_authentication_aborts_before_scanner_and_transport(example_profile, monkeypatch):
+    """
+    Strengthened Authentication Ordering:
+    Invoke actual CLI entry point (main) with missing required credentials.
+    Verify execution aborts before scanner construction and produces zero transport requests.
+    """
+    monkeypatch.delenv("EXAMPLE_API_TOKEN", raising=False)
+    monkeypatch.delenv("NIGHTCRAWLER_RESEARCHER_ID", raising=False)
+    monkeypatch.delenv("RESEARCHER_NAME", raising=False)
+
+    scanner_constructed = []
+    transport_requested = []
+
+    def mock_scanner_init(*args, **kwargs):
+        scanner_constructed.append(kwargs)
+        raise RuntimeError("Scanner should NOT have been constructed!")
+
+    def mock_http_get(*args, **kwargs):
+        transport_requested.append(args)
+        raise RuntimeError("HTTP request should NOT have been dispatched!")
+
+    runner = CliRunner()
+    with patch("main.NightCrawlerScanner.__init__", side_effect=mock_scanner_init), \
+         patch("aiohttp.ClientSession.get", side_effect=mock_http_get):
+        result = runner.invoke(main, [
+            "--program", "example-program",
+            "-t", "https://example.com",
+            "--no-prompt"
+        ])
+
+    assert result.exit_code != 0
+    assert "AUTHENTICATION ERROR" in result.output or "Mandatory authentication credentials missing" in result.output
+    assert len(scanner_constructed) == 0, "NightCrawlerScanner must not be instantiated when credentials are missing"
+    assert len(transport_requested) == 0, "No HTTP transport requests must be dispatched when credentials are missing"
+
+
 # ============================================================================
-# Defect 9: Concurrency Semaphore from RequestPolicyManager
+# Defect 9 & Concurrency: Shared Concurrency Ceiling Verification
 # ============================================================================
 def test_request_policy_manager_semaphore():
     """RequestPolicyManager provides a shared concurrency semaphore matching concurrency limit."""
@@ -376,6 +499,39 @@ def test_request_policy_manager_semaphore():
     sem2 = rpm.get_semaphore()
     assert sem1 is sem2
     assert sem1._value == 3
+
+
+@pytest.mark.asyncio
+async def test_concurrent_http_operations_enforce_profile_concurrency_ceiling():
+    """
+    Strengthened Concurrency:
+    Run concurrent mocked HTTP operations through the actual shared RequestPolicyManager semaphore.
+    Measure maximum simultaneous in-flight requests and verify it never exceeds profile limit.
+    """
+    profile_concurrency = 2
+    rpm = RequestPolicyManager(concurrency_limit=profile_concurrency, max_rps=100.0)
+    sem = rpm.get_semaphore()
+
+    simultaneous_active = 0
+    max_simultaneous = 0
+    lock = asyncio.Lock()
+
+    async def worker(worker_id: int):
+        nonlocal simultaneous_active, max_simultaneous
+        async with sem:
+            async with lock:
+                simultaneous_active += 1
+                if simultaneous_active > max_simultaneous:
+                    max_simultaneous = simultaneous_active
+            await asyncio.sleep(0.02)
+            async with lock:
+                simultaneous_active -= 1
+
+    tasks = [asyncio.create_task(worker(i)) for i in range(10)]
+    await asyncio.gather(*tasks)
+
+    assert max_simultaneous == profile_concurrency
+    assert max_simultaneous <= profile_concurrency
 
 
 # ============================================================================
@@ -409,7 +565,7 @@ def test_load_config_nonexistent_file_raises():
 def test_load_config_malformed_yaml_raises(tmp_path):
     """load_config raises ValueError when YAML contains invalid structure."""
     bad_yaml = tmp_path / "bad.yaml"
-    bad_yaml.write_text("- item1\n- item2\n", encoding="utf-8")  # List instead of dict mapping
+    bad_yaml.write_text("- item1\n- item2\n", encoding="utf-8")
 
     with pytest.raises(ValueError) as excinfo:
         load_config(str(bad_yaml))
@@ -426,3 +582,104 @@ scope:
 
     with pytest.raises(ValueError):
         load_config(str(invalid_bool_yaml))
+
+
+# ============================================================================
+# Section 1: Prevent Disabling Mandatory Strict Scope
+# ============================================================================
+def test_strict_scope_profile_true_cli_false_raises_valueerror(example_profile):
+    """If profile requires strict scope, an explicit attempt to disable strict scope raises ValueError."""
+    assert example_profile.request_policy.strict_scope is True
+
+    with pytest.raises(ValueError) as excinfo:
+        EffectivePolicy.build(
+            profile=example_profile,
+            cli_overrides={"strict_scope": False}
+        )
+    assert "Disabling strict scope is prohibited when program policy requires strict scope" in str(excinfo.value)
+
+
+def test_strict_scope_profile_true_cli_true_succeeds(example_profile):
+    """If profile requires strict scope, an explicit CLI strict_scope=True succeeds."""
+    policy = EffectivePolicy.build(
+        profile=example_profile,
+        cli_overrides={"strict_scope": True}
+    )
+    assert policy.strict_scope is True
+    assert policy.scope_enabled is True
+    assert policy.verify_tls is True
+
+
+def test_strict_scope_profile_true_no_override_remains_true(example_profile):
+    """If profile requires strict scope and no CLI override is provided, strict_scope remains True."""
+    policy = EffectivePolicy.build(profile=example_profile)
+    assert policy.strict_scope is True
+    assert policy.scope_enabled is True
+    assert policy.verify_tls is True
+
+
+def test_strict_scope_cli_rejection_prevents_scanner_and_transport(monkeypatch):
+    """CLI invocation with --no-strict-scope on a strict-scope profile aborts before scanner/transport."""
+    monkeypatch.delenv("EXAMPLE_API_TOKEN", raising=False)
+
+    scanner_constructed = []
+    transport_requested = []
+
+    def mock_scanner_init(*args, **kwargs):
+        scanner_constructed.append(kwargs)
+
+    def mock_http_get(*args, **kwargs):
+        transport_requested.append(args)
+
+    runner = CliRunner()
+    with patch("main.NightCrawlerScanner.__init__", side_effect=mock_scanner_init), \
+         patch("aiohttp.ClientSession.get", side_effect=mock_http_get):
+        result = runner.invoke(main, [
+            "--program", "example-program",
+            "-t", "https://example.com",
+            "--no-strict-scope",
+            "--no-prompt"
+        ])
+
+    assert result.exit_code != 0
+    assert "Disabling strict scope is prohibited" in result.output
+    assert len(scanner_constructed) == 0, "Scanner must not be initialized after policy rejection"
+    assert len(transport_requested) == 0, "Transport must not be initialized after policy rejection"
+
+
+# ============================================================================
+# Section 2: Enforce Profile Concurrency Ceiling Across All Profiles
+# ============================================================================
+@pytest.mark.parametrize("profile_limit, cli_requested, expected_effective", [
+    (1, 10, 1),   # Profile limit 1, CLI 10 -> capped to 1
+    (2, 10, 2),   # Profile limit 2, CLI 10 -> capped to 2
+    (5, 3, 3),    # Profile limit 5, CLI 3 -> narrowed to 3
+    (5, None, 5), # No CLI override -> uses profile limit 5
+])
+def test_profile_concurrency_ceiling_enforcement(profile_limit, cli_requested, expected_effective):
+    """
+    CLI concurrency must never exceed profile ceiling across all profiles.
+    Excessive values are capped to the profile ceiling; narrowing is preserved.
+    """
+    prof = ProgramProfile(
+        id=f"concurrency-{profile_limit}",
+        name=f"Concurrency Program {profile_limit}",
+        requires_review=False
+    )
+    prof.scope.allowed_domains = ["example.com"]
+    prof.request_policy.concurrency = profile_limit
+
+    overrides = {}
+    if cli_requested is not None:
+        overrides["concurrency"] = cli_requested
+
+    policy = EffectivePolicy.build(profile=prof, cli_overrides=overrides)
+    assert policy.concurrency == expected_effective
+    assert policy.request_policy_manager.concurrency_limit == expected_effective
+    assert policy.request_policy_manager.get_semaphore()._value == expected_effective
+
+    # Verify scanner inherits the exact effective concurrency
+    scanner = NightCrawlerScanner(effective_policy=policy)
+    assert scanner.concurrency == expected_effective
+    assert scanner.request_policy_manager.concurrency_limit == expected_effective
+    assert scanner.http_client.strict_mode == policy.strict_scope

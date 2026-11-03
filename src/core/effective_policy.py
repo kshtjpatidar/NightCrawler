@@ -186,9 +186,9 @@ class EffectivePolicy:
         # Concurrency
         if "concurrency" in overrides and overrides["concurrency"] is not None:
             cli_concurrency = strict_positive_int(overrides["concurrency"], "concurrency")
-            if profile and profile.request_policy.concurrency == 1 and cli_concurrency > 1:
-                # Apply strictest concurrency limit
-                effective_concurrency = 1
+            if profile and cli_concurrency > profile.request_policy.concurrency:
+                # CLI concurrency must never exceed profile ceiling: cap to profile maximum
+                effective_concurrency = profile.request_policy.concurrency
             else:
                 effective_concurrency = cli_concurrency
         else:
@@ -219,9 +219,11 @@ class EffectivePolicy:
 
         # Safety Check: If program policy requires strict scope, CLI cannot weaken scope enforcement
         if base_strict_scope:
+            if cli_strict_scope is False:
+                raise ValueError("Disabling strict scope is prohibited when program policy requires strict scope.")
             if cli_scope_enabled is False:
                 raise ValueError("Disabling target scope is prohibited when program policy requires strict scope.")
-            effective_strict_scope = cli_strict_scope if cli_strict_scope is not None else base_strict_scope
+            effective_strict_scope = True
             effective_scope_enabled = True
         else:
             effective_strict_scope = cli_strict_scope if cli_strict_scope is not None else base_strict_scope
