@@ -70,7 +70,7 @@ def parse_authorized_providers(val: Any, context: str = "program profile") -> Li
         return []
     if isinstance(val, str):
         raise ValueError(f"authorized_providers in {context} must be a list of strings, got str: '{val}'")
-    if not isinstance(val, (list, tuple, set)):
+    if not isinstance(val, (list, tuple, set, frozenset)):
         raise ValueError(f"authorized_providers in {context} must be a list of strings, got {type(val).__name__}")
 
     cleaned = []

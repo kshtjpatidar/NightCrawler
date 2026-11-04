@@ -121,9 +121,27 @@ class NightCrawlerHttpClient:
             self.strict_mode = effective_policy.strict_scope
             self.max_redirects = max_redirects
             self.max_retries = max_retries
-            self.authorized_providers = set(getattr(effective_policy, "authorized_providers", set()) or set())
-            if authorized_providers:
-                self.authorized_providers.update(authorized_providers)
+
+            # EffectivePolicy.authorized_providers is the authoritative maximum permission set
+            raw_policy_providers = getattr(effective_policy, "authorized_providers", None)
+            if raw_policy_providers:
+                policy_providers = frozenset(parse_authorized_providers(raw_policy_providers, context="EffectivePolicy"))
+            else:
+                policy_providers = frozenset()
+
+            if authorized_providers is not None:
+                parsed_constructor = set(parse_authorized_providers(authorized_providers, context="HttpClient constructor"))
+                unauthorized = parsed_constructor - set(policy_providers)
+                if unauthorized:
+                    raise ValueError(
+                        f"Constructor cannot expand authorized_providers beyond EffectivePolicy allowlist. "
+                        f"Unauthorized additions: {sorted(unauthorized)}. "
+                        f"EffectivePolicy allowlist: {sorted(policy_providers)}."
+                    )
+                # Narrowing permissions: use set intersection
+                self._authorized_providers = frozenset(set(policy_providers) & parsed_constructor)
+            else:
+                self._authorized_providers = policy_providers
         else:
             self.effective_policy = None
             self.scope_manager = scope_manager
@@ -145,11 +163,11 @@ class NightCrawlerHttpClient:
             self.max_retries = max_retries
             if authorized_providers is not None:
                 try:
-                    self.authorized_providers = set(parse_authorized_providers(authorized_providers, context="HttpClient"))
+                    self._authorized_providers = frozenset(parse_authorized_providers(authorized_providers, context="HttpClient"))
                 except Exception:
-                    self.authorized_providers = set()
+                    self._authorized_providers = frozenset()
             else:
-                self.authorized_providers = set()
+                self._authorized_providers = frozenset()
 
         if self.strict_mode and not self.verify_tls:
             raise ValueError("Insecure TLS configuration is prohibited in strict compliance mode.")
@@ -165,6 +183,35 @@ class NightCrawlerHttpClient:
 
         # Policy-aware DNS Resolver instance
         self._resolver = PolicyAwareResolver(self)
+
+    @property
+    def authorized_providers(self) -> frozenset:
+        """Immutable view of authorized providers for this HTTP client."""
+        return self._authorized_providers
+
+    @authorized_providers.setter
+    def authorized_providers(self, value: Any):
+        """
+        Enforce monotonic permission narrowing on attribute assignment.
+        Cannot expand permissions beyond the authoritative EffectivePolicy or initial client allowlist.
+        """
+        if self.effective_policy is not None:
+            ceiling = getattr(self, "_authorized_providers", None)
+            if ceiling is None:
+                ceiling = frozenset(getattr(self.effective_policy, "authorized_providers", set()) or set())
+            parsed = set(parse_authorized_providers(value, context="HttpClient.authorized_providers"))
+            unauthorized = parsed - set(ceiling)
+            if unauthorized:
+                raise ValueError(
+                    f"Cannot expand authorized_providers beyond authoritative allowlist via attribute assignment. "
+                    f"Unauthorized additions: {sorted(unauthorized)}."
+                )
+            self._authorized_providers = frozenset(set(ceiling) & parsed)
+        else:
+            try:
+                self._authorized_providers = frozenset(parse_authorized_providers(value, context="HttpClient.authorized_providers"))
+            except Exception:
+                self._authorized_providers = frozenset()
 
     @staticmethod
     def _normalize_hostname(host: Optional[str]) -> str:
@@ -208,7 +255,7 @@ class NightCrawlerHttpClient:
             return False
         if not url or not isinstance(url, str) or not url.strip():
             return False
-        if not self.authorized_providers or not isinstance(self.authorized_providers, (set, list, tuple)):
+        if not self.authorized_providers or not isinstance(self.authorized_providers, (set, frozenset, list, tuple)):
             return False
 
         try:

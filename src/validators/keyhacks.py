@@ -29,6 +29,7 @@ from rich.console import Console
 from src.core.http_client import _in_concurrency_scope, PolicyAwareResolver
 from src.core.audit_logger import AuditLogger
 from src.output.html_report import mask_secret
+from src.core.program_profile import parse_authorized_providers
 
 console = Console()
 
@@ -1119,8 +1120,26 @@ class KeyHacksValidator:
             self.http_client = http_client or getattr(effective_policy, "http_client", None)
             policy_tls = getattr(effective_policy, "verify_tls", None)
             self.verify_ssl = policy_tls if policy_tls is not None else verify_ssl
-            policy_providers = getattr(effective_policy, "authorized_providers", None)
-            self.authorized_providers = set(authorized_providers) if authorized_providers is not None else (set(policy_providers) if policy_providers else set())
+            
+            raw_policy_providers = getattr(effective_policy, "authorized_providers", None)
+            if raw_policy_providers:
+                policy_providers = frozenset(parse_authorized_providers(raw_policy_providers, context="EffectivePolicy"))
+            else:
+                policy_providers = frozenset()
+
+            if authorized_providers is not None:
+                parsed_constructor = set(parse_authorized_providers(authorized_providers, context="KeyHacksValidator constructor"))
+                unauthorized = parsed_constructor - set(policy_providers)
+                if unauthorized:
+                    raise ValueError(
+                        f"KeyHacksValidator constructor cannot expand authorized_providers beyond EffectivePolicy allowlist. "
+                        f"Unauthorized additions: {sorted(unauthorized)}. "
+                        f"EffectivePolicy allowlist: {sorted(policy_providers)}."
+                    )
+                self._authorized_providers = frozenset(set(policy_providers) & parsed_constructor)
+            else:
+                self._authorized_providers = policy_providers
+
             policy_state_changing = getattr(effective_policy, "allow_state_changing", False)
             if allow_state_changing and not policy_state_changing:
                 raise ValueError("EffectivePolicy prohibits state-changing operations.")
@@ -1132,17 +1151,47 @@ class KeyHacksValidator:
             self.http_client = http_client
             self.verify_ssl = verify_ssl
             self.allow_state_changing = allow_state_changing
-            self.authorized_providers = set(authorized_providers) if authorized_providers is not None else set()
-
-        if self.http_client is not None and self.authorized_providers:
-            if getattr(self.http_client, "authorized_providers", None) is not None:
-                self.http_client.authorized_providers.update(self.authorized_providers)
+            if authorized_providers is not None:
+                try:
+                    self._authorized_providers = frozenset(parse_authorized_providers(authorized_providers, context="KeyHacksValidator"))
+                except Exception:
+                    self._authorized_providers = frozenset()
             else:
-                self.http_client.authorized_providers = set(self.authorized_providers)
+                self._authorized_providers = frozenset()
+
+        # Only synchronize with standalone mock http_client if neither has an effective policy
+        if self.http_client is not None and self.effective_policy is None and not getattr(self.http_client, "authorized_providers", None):
+            self.http_client.authorized_providers = self._authorized_providers
 
         self.timeout = aiohttp.ClientTimeout(total=timeout)
         self.validated_count = 0
         self.valid_secrets = []
+
+    @property
+    def authorized_providers(self) -> frozenset:
+        """Immutable view of authorized providers for this validator."""
+        return self._authorized_providers
+
+    @authorized_providers.setter
+    def authorized_providers(self, value: Any):
+        """Monotonic narrowing only on attribute assignment."""
+        if self.effective_policy is not None:
+            ceiling = getattr(self, "_authorized_providers", None)
+            if ceiling is None:
+                ceiling = frozenset(getattr(self.effective_policy, "authorized_providers", set()) or set())
+            parsed = set(parse_authorized_providers(value, context="KeyHacksValidator.authorized_providers"))
+            unauthorized = parsed - set(ceiling)
+            if unauthorized:
+                raise ValueError(
+                    f"Cannot expand authorized_providers beyond authoritative allowlist on KeyHacksValidator. "
+                    f"Unauthorized additions: {sorted(unauthorized)}."
+                )
+            self._authorized_providers = frozenset(set(ceiling) & parsed)
+        else:
+            try:
+                self._authorized_providers = frozenset(parse_authorized_providers(value, context="KeyHacksValidator.authorized_providers"))
+            except Exception:
+                self._authorized_providers = frozenset()
 
     @classmethod
     def from_policy(
@@ -1160,8 +1209,24 @@ class KeyHacksValidator:
             raise ValueError("EffectivePolicy prohibits state-changing operations.")
         effective_state_changing = policy_state_changing and allow_state_changing if allow_state_changing else policy_state_changing
 
-        policy_providers = getattr(effective_policy, "authorized_providers", None)
-        providers = set(authorized_providers) if authorized_providers is not None else (set(policy_providers) if policy_providers else set())
+        raw_policy_providers = getattr(effective_policy, "authorized_providers", None)
+        if raw_policy_providers:
+            policy_providers = frozenset(parse_authorized_providers(raw_policy_providers, context="EffectivePolicy"))
+        else:
+            policy_providers = frozenset()
+
+        if authorized_providers is not None:
+            parsed = set(parse_authorized_providers(authorized_providers, context="KeyHacksValidator.from_policy"))
+            unauthorized = parsed - set(policy_providers)
+            if unauthorized:
+                raise ValueError(
+                    f"KeyHacksValidator.from_policy cannot expand authorized_providers beyond EffectivePolicy allowlist. "
+                    f"Unauthorized additions: {sorted(unauthorized)}. "
+                    f"EffectivePolicy allowlist: {sorted(policy_providers)}."
+                )
+            providers = frozenset(set(policy_providers) & parsed)
+        else:
+            providers = policy_providers
         
         http_client = getattr(effective_policy, "http_client", None)
         if http_client is None:
@@ -1377,6 +1442,22 @@ class KeyHacksValidator:
                 raise KeyHacksPolicyError("Insecure TLS verification is prohibited under strict policy compliance")
         if hasattr(self.http_client, "verify_tls") and self.http_client.verify_tls != self.verify_ssl:
             raise KeyHacksPolicyError("Conflicting TLS configuration between HttpClient and KeyHacksValidator")
+
+        # Provider authorization boundary verification
+        if self.effective_policy is not None:
+            raw_policy_providers = getattr(self.effective_policy, "authorized_providers", set()) or set()
+            policy_providers = frozenset(raw_policy_providers)
+            unauthorized_validator = set(self.authorized_providers) - set(policy_providers)
+            if unauthorized_validator:
+                raise KeyHacksPolicyError(
+                    f"KeyHacksValidator authorized_providers expanded beyond EffectivePolicy: {sorted(unauthorized_validator)}"
+                )
+            if hasattr(self.http_client, "authorized_providers") and self.http_client.authorized_providers is not None:
+                unauthorized_client = set(self.http_client.authorized_providers) - set(policy_providers)
+                if unauthorized_client:
+                    raise KeyHacksPolicyError(
+                        f"HttpClient authorized_providers expanded beyond EffectivePolicy: {sorted(unauthorized_client)}"
+                    )
 
     def print_disclaimer(self):
         """Print ethical use disclaimer"""

@@ -64,9 +64,28 @@ class EffectivePolicy:
     validate_keys: bool
     requires_review: bool
     review_notes: List[str] = field(default_factory=list)
-    authorized_providers: Set[str] = field(default_factory=set)
+    authorized_providers: frozenset = field(default_factory=frozenset)
     allow_state_changing: bool = False
     http_client: Optional[Any] = None
+
+    def __setattr__(self, name: str, value: Any):
+        if name == "authorized_providers":
+            if getattr(self, "_authorized_providers_locked", False):
+                raise AttributeError("Cannot reassign or mutate authorized_providers on EffectivePolicy; permissions are immutable.")
+            if value is None:
+                val = frozenset()
+            elif isinstance(value, (set, frozenset, list, tuple)):
+                from src.core.program_profile import parse_authorized_providers
+                try:
+                    val = frozenset(parse_authorized_providers(value, context="EffectivePolicy"))
+                except Exception:
+                    val = frozenset(value)
+            else:
+                val = frozenset()
+            super().__setattr__("authorized_providers", val)
+            super().__setattr__("_authorized_providers_locked", True)
+            return
+        super().__setattr__(name, value)
 
     @classmethod
     def build(
@@ -264,11 +283,11 @@ class EffectivePolicy:
                         f"CLI cannot expand program '{profile.id}' authorized providers with {sorted(unauthorized_additions)}. "
                         f"Only providers explicitly authorized by the program profile ({sorted(profile_providers) or 'None'}) are permitted."
                     )
-                auth_providers = cli_providers
+                auth_providers = frozenset(cli_providers)
             else:
-                auth_providers = cli_providers
+                auth_providers = frozenset(cli_providers)
         else:
-            auth_providers = profile_providers
+            auth_providers = frozenset(profile_providers)
 
         # State-Changing Operations Precedence
         if "allow_state_changing" in overrides and overrides["allow_state_changing"] is not None:
