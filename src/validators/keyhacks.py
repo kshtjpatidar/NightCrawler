@@ -994,6 +994,81 @@ KEYHACKS_VALIDATORS = {
     },
 }
 
+_PROVIDER_MAP = {
+    "PayPal Braintree Token": ("braintree", ValidationSideEffect.READ_ONLY),
+    "Square Access Token": ("square", ValidationSideEffect.READ_ONLY),
+    "Razorpay API Key": ("razorpay", ValidationSideEffect.READ_ONLY),
+    "Travis CI API Token": ("travis", ValidationSideEffect.READ_ONLY),
+    "NPM Access Token": ("npm", ValidationSideEffect.READ_ONLY),
+    "SendGrid API Key": ("sendgrid", ValidationSideEffect.READ_ONLY),
+    "MailGun API Key": ("mailgun", ValidationSideEffect.READ_ONLY),
+    "MailChimp API Key": ("mailchimp", ValidationSideEffect.READ_ONLY),
+    "Heroku API Key": ("heroku", ValidationSideEffect.READ_ONLY),
+    "DigitalOcean Token": ("digitalocean", ValidationSideEffect.READ_ONLY),
+    "Cloudflare API Key": ("cloudflare", ValidationSideEffect.READ_ONLY),
+    "Vercel Token": ("vercel", ValidationSideEffect.READ_ONLY),
+    "Netlify Token": ("netlify", ValidationSideEffect.READ_ONLY),
+    "Datadog API Key": ("datadog", ValidationSideEffect.READ_ONLY),
+    "New Relic API Key": ("newrelic", ValidationSideEffect.READ_ONLY),
+    "Sentry Auth Token": ("sentry", ValidationSideEffect.READ_ONLY),
+    "PagerDuty API Key": ("pagerduty", ValidationSideEffect.READ_ONLY),
+    "Facebook Access Token": ("facebook", ValidationSideEffect.READ_ONLY),
+    "Twitter Bearer Token": ("twitter", ValidationSideEffect.READ_ONLY),
+    "Instagram Access Token": ("instagram", ValidationSideEffect.READ_ONLY),
+    "LinkedIn Client Secret": ("linkedin", ValidationSideEffect.READ_ONLY),
+    "Shodan API Key": ("shodan", ValidationSideEffect.READ_ONLY),
+    "VirusTotal API Key": ("virustotal", ValidationSideEffect.READ_ONLY),
+    "Censys API Key": ("censys", ValidationSideEffect.READ_ONLY),
+    "OpenAI API Key": ("openai", ValidationSideEffect.READ_ONLY),
+    "Algolia API Key": ("algolia", ValidationSideEffect.READ_ONLY),
+    "Mapbox API Key": ("mapbox", ValidationSideEffect.READ_ONLY),
+    "HubSpot API Key": ("hubspot", ValidationSideEffect.READ_ONLY),
+    "Asana Access Token": ("asana", ValidationSideEffect.READ_ONLY),
+    "Zendesk API Token": ("zendesk", ValidationSideEffect.READ_ONLY),
+    "Grafana Access Token": ("grafana", ValidationSideEffect.READ_ONLY),
+    "Spotify Access Token": ("spotify", ValidationSideEffect.READ_ONLY),
+    "YouTube API Key": ("google", ValidationSideEffect.READ_ONLY),
+    "Notion API Token": ("notion", ValidationSideEffect.READ_ONLY),
+    "Figma Access Token": ("figma", ValidationSideEffect.READ_ONLY),
+    "Airtable PAT": ("airtable", ValidationSideEffect.READ_ONLY),
+    "Linear API Key": ("linear", ValidationSideEffect.READ_ONLY),
+    "Jira API Token": ("atlassian", ValidationSideEffect.READ_ONLY),
+    "Confluence API Token": ("atlassian", ValidationSideEffect.READ_ONLY),
+    "Supabase API Key": ("supabase", ValidationSideEffect.READ_ONLY),
+    "PlanetScale API Token": ("planetscale", ValidationSideEffect.READ_ONLY),
+    "Clerk API Key": ("clerk", ValidationSideEffect.READ_ONLY),
+    "Auth0 Management Token": ("auth0", ValidationSideEffect.READ_ONLY),
+    "Plaid API Key": ("plaid", ValidationSideEffect.READ_ONLY),
+    "Loom API Token": ("loom", ValidationSideEffect.READ_ONLY),
+    "Postman API Key": ("postman", ValidationSideEffect.READ_ONLY),
+    "Mixpanel API Secret": ("mixpanel", ValidationSideEffect.READ_ONLY),
+    "Amplitude API Key": ("amplitude", ValidationSideEffect.READ_ONLY),
+    "LaunchDarkly API Key": ("launchdarkly", ValidationSideEffect.READ_ONLY),
+    "Intercom Access Token": ("intercom", ValidationSideEffect.READ_ONLY),
+    "Freshdesk API Key": ("freshdesk", ValidationSideEffect.READ_ONLY),
+    "Dropbox Access Token": ("dropbox", ValidationSideEffect.READ_ONLY),
+    "Box Access Token": ("box", ValidationSideEffect.READ_ONLY),
+    "Monday API Token": ("monday", ValidationSideEffect.READ_ONLY),
+    "ClickUp API Token": ("clickup", ValidationSideEffect.READ_ONLY),
+    "Trello API Key": ("trello", ValidationSideEffect.READ_ONLY),
+    "Bitly Access Token": ("bitly", ValidationSideEffect.READ_ONLY),
+    "RapidAPI Key": ("rapidapi", ValidationSideEffect.READ_ONLY),
+    "Cohere API Key": ("cohere", ValidationSideEffect.READ_ONLY),
+    "Replicate API Token": ("replicate", ValidationSideEffect.READ_ONLY),
+    "Pinecone API Key": ("pinecone", ValidationSideEffect.READ_ONLY),
+    "Weaviate API Key": ("weaviate", ValidationSideEffect.READ_ONLY),
+}
+
+for _vname, (_prov, _se) in _PROVIDER_MAP.items():
+    if _vname in KEYHACKS_VALIDATORS:
+        KEYHACKS_VALIDATORS[_vname].setdefault("provider", _prov)
+        KEYHACKS_VALIDATORS[_vname].setdefault("side_effect", _se)
+
+# Any validator still missing side_effect or provider defaults to UNKNOWN for fail-closed security
+for _v in KEYHACKS_VALIDATORS.values():
+    _v.setdefault("side_effect", ValidationSideEffect.UNKNOWN)
+    _v.setdefault("provider", "unknown")
+
 
 class KeyHacksValidator:
     """
@@ -1057,6 +1132,12 @@ class KeyHacksValidator:
             self.allow_state_changing = allow_state_changing
             self.authorized_providers = set(authorized_providers) if authorized_providers is not None else set()
 
+        if self.http_client is not None and self.authorized_providers:
+            if getattr(self.http_client, "authorized_providers", None) is not None:
+                self.http_client.authorized_providers.update(self.authorized_providers)
+            else:
+                self.http_client.authorized_providers = set(self.authorized_providers)
+
         self.timeout = aiohttp.ClientTimeout(total=timeout)
         self.validated_count = 0
         self.valid_secrets = []
@@ -1097,8 +1178,15 @@ class KeyHacksValidator:
     def redact_url(cls, url: str, secret: Optional[str] = None) -> str:
         """Redact query credentials, webhook paths, and embedded secrets in URLs."""
         clean = AuditLogger.redact_url(url)
-        if secret and secret in clean:
+        if secret:
+            from urllib.parse import quote, quote_plus
             clean = clean.replace(secret, "[REDACTED]")
+            clean = clean.replace(quote(secret), "[REDACTED]")
+            clean = clean.replace(quote_plus(secret), "[REDACTED]")
+            try:
+                clean = re.sub(re.escape(secret), "[REDACTED]", clean, flags=re.IGNORECASE)
+            except Exception:
+                pass
         return clean
 
     @classmethod
@@ -1107,8 +1195,15 @@ class KeyHacksValidator:
         if not text:
             return ""
         clean = str(text)
-        if secret and secret in clean:
+        if secret:
+            from urllib.parse import quote, quote_plus
             clean = clean.replace(secret, "[REDACTED]")
+            clean = clean.replace(quote(secret), "[REDACTED]")
+            clean = clean.replace(quote_plus(secret), "[REDACTED]")
+            try:
+                clean = re.sub(re.escape(secret), "[REDACTED]", clean, flags=re.IGNORECASE)
+            except Exception:
+                pass
 
         # Redact bearer tokens and authorization headers
         clean = re.sub(r'(?i)(bearer\s+)[A-Za-z0-9_\-\.]{8,}', r'\1[REDACTED]', clean)
@@ -1117,7 +1212,7 @@ class KeyHacksValidator:
         clean = re.sub(r'(?i)(Basic\s+)[A-Za-z0-9+/=]{8,}', r'\1[REDACTED]', clean)
 
         # Redact common query string secrets
-        clean = re.sub(r'([?&](?:access_token|key|api_key|apiKey|secret|password|circle-token)=)[^&\s\'"]+', r'\1[REDACTED]', clean, flags=re.I)
+        clean = re.sub(r'([?&](?:access_token|key|api_key|apiKey|secret|password|circle-token|token)=)[^&\s\'"]+', r'\1[REDACTED]', clean, flags=re.I)
 
         # Redact webhook path tokens
         clean = re.sub(r'(hooks\.slack\.com/services/T[^/]+/B[^/]+/)[^/\s?#\'"]+', r'\1[REDACTED]', clean)
@@ -1220,15 +1315,11 @@ class KeyHacksValidator:
         if "*" in self.authorized_providers or "all" in self.authorized_providers:
             return True
         provider = (validator.get("provider") or self.extract_provider_from_url(url)).lower()
-        if provider in self.authorized_providers:
-            return True
-        parsed = urlparse(url)
-        host = (parsed.hostname or "").lower()
-        for p in self.authorized_providers:
-            p_clean = p.lower().lstrip(".*")
-            if p_clean and (host == p_clean or host.endswith("." + p_clean) or p_clean in host):
-                return True
-        return False
+        if self.http_client is not None and hasattr(self.http_client, "is_provider_authorized"):
+            return self.http_client.is_provider_authorized(provider, url)
+        from src.core.http_client import NightCrawlerHttpClient
+        client = NightCrawlerHttpClient(authorized_providers=self.authorized_providers)
+        return client.is_provider_authorized(provider, url)
 
     def validate_policy_dependencies(self, connector: Optional[aiohttp.TCPConnector] = None) -> None:
         """
@@ -1308,9 +1399,26 @@ class KeyHacksValidator:
             sanitized_cmd = self.build_sanitized_command(validator, secret, extra_params, url, method)
 
             # Check side effects before touching network or dependency validation
-            side_effect = validator.get("side_effect", ValidationSideEffect.READ_ONLY)
+            side_effect = validator.get("side_effect")
+            if side_effect is None:
+                if method in ("GET", "HEAD"):
+                    side_effect = ValidationSideEffect.READ_ONLY
+                else:
+                    side_effect = ValidationSideEffect.UNKNOWN
             side_effect_str = side_effect.value if isinstance(side_effect, ValidationSideEffect) else str(side_effect).lower()
-            if side_effect_str in ("state_changing", "destructive") and not self.allow_state_changing:
+            if side_effect_str == "unknown":
+                return ValidationResult(
+                    status=ValidationStatus.UNKNOWN,
+                    message=f"Validation operation for '{validator.get('description', 'secret')}' has unknown side effects and is blocked.",
+                    validation_command=sanitized_cmd
+                )
+            if side_effect_str == "destructive":
+                return ValidationResult(
+                    status=ValidationStatus.UNKNOWN,
+                    message=f"Destructive validation for '{validator.get('description', 'secret')}' is prohibited.",
+                    validation_command=sanitized_cmd
+                )
+            if side_effect_str == "state_changing" and not self.allow_state_changing:
                 return ValidationResult(
                     status=ValidationStatus.UNKNOWN,
                     message=f"State-changing validation for '{validator.get('description', 'secret')}' is disabled by default. Requires explicit authorization.",

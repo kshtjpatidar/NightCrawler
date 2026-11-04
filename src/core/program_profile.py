@@ -103,6 +103,7 @@ class AuthenticationDefinition:
 
 @dataclass
 class TestingPermissionsDefinition:
+    __test__ = False
     passive_recon: bool = True
     active_recon: bool = False
     endpoint_discovery: bool = True
@@ -114,6 +115,7 @@ class TestingPermissionsDefinition:
     destructive_testing: bool = False
     denial_of_service: bool = False
     social_engineering: bool = False
+    state_changing_allowed: bool = False
 
 
 @dataclass
@@ -149,6 +151,7 @@ class ProgramProfile:
     testing_permissions: TestingPermissionsDefinition = field(default_factory=TestingPermissionsDefinition)
     tool_restrictions: ToolRestrictionsDefinition = field(default_factory=ToolRestrictionsDefinition)
     reporting: ReportingDefinition = field(default_factory=ReportingDefinition)
+    authorized_providers: List[str] = field(default_factory=list)
 
     def resolve_headers(self) -> Dict[str, str]:
         """Resolve header values expanding ${ENV_VAR} syntax safely."""
@@ -219,6 +222,7 @@ class ProgramProfile:
                 "destructive_testing": False,  # Always hard-coded false
                 "denial_of_service": False,   # Always hard-coded false
                 "social_engineering": self.testing_permissions.social_engineering,
+                "state_changing_allowed": self.testing_permissions.state_changing_allowed,
             },
             "tool_restrictions": {
                 "allowed_tools": list(self.tool_restrictions.allowed_tools),
@@ -228,7 +232,8 @@ class ProgramProfile:
                 "default_template": self.reporting.default_template,
                 "default_format": self.reporting.default_format,
                 "program_name": self.reporting.program_name,
-            }
+            },
+            "authorized_providers": list(self.authorized_providers)
         }
 
     def save_yaml(self, path: Path):
@@ -350,7 +355,8 @@ class PolicyParser:
             injection_testing=strict_bool(tp_raw.get("injection_testing", False), "testing_permissions.injection_testing") if "injection_testing" in tp_raw else False,
             destructive_testing=False,  # Enforce hard safety ceiling
             denial_of_service=False,   # Enforce hard safety ceiling
-            social_engineering=strict_bool(tp_raw.get("social_engineering", False), "testing_permissions.social_engineering") if "social_engineering" in tp_raw else False
+            social_engineering=strict_bool(tp_raw.get("social_engineering", False), "testing_permissions.social_engineering") if "social_engineering" in tp_raw else False,
+            state_changing_allowed=strict_bool(tp_raw.get("state_changing_allowed", False), "testing_permissions.state_changing_allowed") if "state_changing_allowed" in tp_raw else False
         )
 
         tr_raw = data.get("tool_restrictions", {})
@@ -365,6 +371,9 @@ class PolicyParser:
             default_format=rep_raw.get("default_format", "html"),
             program_name=rep_raw.get("program_name", p_name)
         )
+
+        auth_providers_raw = data.get("authorized_providers", [])
+        authorized_providers = [str(p).strip().lower() for p in auth_providers_raw if str(p).strip()]
 
         requires_review = strict_bool(data.get("requires_review", False), "requires_review") if "requires_review" in data else False
         review_notes = list(data.get("review_notes", []))
@@ -386,7 +395,8 @@ class PolicyParser:
             authentication=authentication,
             testing_permissions=testing_permissions,
             tool_restrictions=tool_restrictions,
-            reporting=reporting
+            reporting=reporting,
+            authorized_providers=authorized_providers
         )
 
     @classmethod

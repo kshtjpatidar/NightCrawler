@@ -222,14 +222,14 @@ def load_config(config_file: Optional[str] = None) -> NightCrawlerConfig:
 
     if os.getenv("NIGHTCRAWLER_MAX_RPS"):
         try:
-            cfg.max_requests_per_second = float(os.getenv("NIGHTCRAWLER_MAX_RPS"))
-        except ValueError:
+            cfg.max_requests_per_second = strict_positive_float(os.getenv("NIGHTCRAWLER_MAX_RPS"), "NIGHTCRAWLER_MAX_RPS")
+        except (ValueError, TypeError):
             pass
 
     if os.getenv("NIGHTCRAWLER_CONCURRENCY"):
         try:
-            cfg.concurrency = int(os.getenv("NIGHTCRAWLER_CONCURRENCY"))
-        except ValueError:
+            cfg.concurrency = strict_positive_int(os.getenv("NIGHTCRAWLER_CONCURRENCY"), "NIGHTCRAWLER_CONCURRENCY")
+        except (ValueError, TypeError):
             pass
 
     return cfg

@@ -6,6 +6,7 @@ Scope-aware, rate-limited recon tools with custom headers and compliance control
 import subprocess
 import shutil
 import os
+import shlex
 from pathlib import Path
 from typing import List, Optional, Dict
 from rich.console import Console
@@ -14,6 +15,66 @@ from src.core.scope import ScopeManager
 from src.core.header_manager import HeaderManager
 
 console = Console()
+
+DEFAULT_TOOL_TIMEOUT = 60  # seconds
+MAX_TOOL_OUTPUT_BYTES = 5 * 1024 * 1024  # 5MB limit to prevent memory exhaustion
+
+
+def get_sanitized_env() -> Dict[str, str]:
+    """
+    Return a stripped environment for child subprocesses to prevent
+    leaking API keys, tokens, credentials, or researcher IDs.
+    """
+    safe_keys = {
+        "PATH", "HOME", "USER", "SHELL", "TMPDIR", "LANG", "LC_ALL",
+        "GOPATH", "GOROOT", "TERM", "SYSTEMROOT", "WINDIR"
+    }
+    clean_env = {}
+    for k, v in os.environ.items():
+        k_upper = k.upper()
+        if k in safe_keys:
+            clean_env[k] = v
+        elif any(s in k_upper for s in ("TOKEN", "KEY", "SECRET", "AUTH", "PASS", "CREDENTIAL", "NIGHTCRAWLER")):
+            # Redact/strip sensitive credentials from child environments
+            continue
+        else:
+            clean_env[k] = v
+    return clean_env
+
+
+def run_bounded_tool(
+    cmd: List[str],
+    input_text: Optional[str] = None,
+    timeout: int = DEFAULT_TOOL_TIMEOUT
+) -> Optional[str]:
+    """
+    Safely execute tool subprocess with:
+    - No shell injection (list args)
+    - Timeout enforcement & process termination
+    - Sanitized environment (no secret leakage)
+    - Bounded memory output
+    """
+    try:
+        proc = subprocess.run(
+            cmd,
+            input=input_text,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            env=get_sanitized_env()
+        )
+        if proc.returncode == 0:
+            out = proc.stdout or ""
+            if len(out) > MAX_TOOL_OUTPUT_BYTES:
+                out = out[:MAX_TOOL_OUTPUT_BYTES]
+            return out
+        return None
+    except subprocess.TimeoutExpired:
+        console.print(f"[yellow][!] Tool execution timed out after {timeout}s: {' '.join(cmd[:2])}[/]")
+        return None
+    except Exception as e:
+        console.print(f"[red][!] Error running tool {' '.join(cmd[:2])}: {e}[/]")
+        return None
 
 # Tool configuration
 TOOL_CONFIG = {
@@ -78,20 +139,24 @@ def find_tool(tool_name: str) -> Optional[str]:
 
 
 def install_tool(tool_name: str) -> bool:
-    """Install a tool using go install"""
+    """Install a tool using go install (no shell=True, timeout enforced)"""
     config = TOOL_CONFIG.get(tool_name)
     if not config:
         return False
     
     console.print(f"[cyan][*] Installing {config['name']}...[/]")
     try:
-        result = subprocess.run(config["install"], shell=True, capture_output=True, text=True)
+        cmd = shlex.split(config["install"])
+        result = subprocess.run(cmd, shell=False, capture_output=True, text=True, timeout=120, env=get_sanitized_env())
         if result.returncode == 0:
             console.print(f"[green][+] {config['name']} installed![/]")
             return True
         else:
             console.print(f"[red][!] Failed to install {config['name']}: {result.stderr}[/]")
             return False
+    except subprocess.TimeoutExpired:
+        console.print(f"[red][!] Installation of {config['name']} timed out after 120s[/]")
+        return False
     except Exception as e:
         console.print(f"[red][!] Error installing {config['name']}: {e}[/]")
         return False
@@ -132,31 +197,26 @@ class SubfinderIntegration:
         if silent:
             cmd.append('-silent')
         
-        try:
-            console.print(f"[cyan][*] Running Subfinder on {domain}...[/]")
-            result = subprocess.run(cmd, capture_output=True, text=True)
-            
-            raw_subdomains = []
-            if result.returncode == 0:
-                raw_subdomains = [line.strip() for line in result.stdout.strip().split('\n') if line.strip()]
-            
-            if not raw_subdomains:
-                raw_subdomains = [domain]
+        console.print(f"[cyan][*] Running Subfinder on {domain}...[/]")
+        stdout = run_bounded_tool(cmd, timeout=DEFAULT_TOOL_TIMEOUT)
+        
+        raw_subdomains = []
+        if stdout:
+            raw_subdomains = [line.strip() for line in stdout.strip().split('\n') if line.strip()]
+        
+        if not raw_subdomains:
+            raw_subdomains = [domain]
 
-            # Strictly filter results against authorized scope
-            if self.scope_manager:
-                valid_subdomains = self.scope_manager.filter_subdomains(raw_subdomains)
-                filtered_out = len(raw_subdomains) - len(valid_subdomains)
-                if filtered_out > 0:
-                    console.print(f"[yellow][!] Filtered out {filtered_out} out-of-scope subdomains[/]")
-                console.print(f"[green][+] Found {len(valid_subdomains)} in-scope subdomains[/]")
-                return valid_subdomains
-            
-            return raw_subdomains
-                
-        except Exception as e:
-            console.print(f"[red][!] Error running Subfinder: {e}[/]")
-            return [domain] if (not self.scope_manager or self.scope_manager.is_host_allowed(domain)) else []
+        # Strictly filter results against authorized scope
+        if self.scope_manager:
+            valid_subdomains = self.scope_manager.filter_subdomains(raw_subdomains)
+            filtered_out = len(raw_subdomains) - len(valid_subdomains)
+            if filtered_out > 0:
+                console.print(f"[yellow][!] Filtered out {filtered_out} out-of-scope subdomains[/]")
+            console.print(f"[green][+] Found {len(valid_subdomains)} in-scope subdomains[/]")
+            return valid_subdomains
+        
+        return raw_subdomains
 
 
 class KatanaIntegration:
@@ -208,21 +268,14 @@ class KatanaIntegration:
             if header_flag:
                 cmd.extend(['-H', header_flag])
         
-        try:
-            console.print(f"[cyan][*] Running Katana crawler (depth={depth}, rate-limit={rate_limit_val} rps)...[/]")
-            result = subprocess.run(cmd, input='\n'.join(in_scope_targets), capture_output=True, text=True)
-            
-            if result.returncode == 0:
-                raw_urls = [line.strip() for line in result.stdout.strip().split('\n') if line.strip()]
-                # Strictly filter crawled URLs against scope
-                in_scope_urls = self.scope_manager.filter_urls(raw_urls) if self.scope_manager else raw_urls
-                console.print(f"[green][+] Katana found {len(in_scope_urls)} in-scope URLs[/]")
-                return in_scope_urls
-            return []
-                
-        except Exception as e:
-            console.print(f"[red][!] Error running Katana: {e}[/]")
-            return []
+        console.print(f"[cyan][*] Running Katana crawler (depth={depth}, rate-limit={rate_limit_val} rps)...[/]")
+        stdout = run_bounded_tool(cmd, input_text='\n'.join(in_scope_targets), timeout=120)
+        if stdout:
+            raw_urls = [line.strip() for line in stdout.strip().split('\n') if line.strip()]
+            in_scope_urls = self.scope_manager.filter_urls(raw_urls) if self.scope_manager else raw_urls
+            console.print(f"[green][+] Katana found {len(in_scope_urls)} in-scope URLs[/]")
+            return in_scope_urls
+        return []
 
 
 class GauIntegration:
@@ -248,23 +301,16 @@ class GauIntegration:
 
         cmd = [self.tool_path, '--threads', str(threads)]
         
-        try:
-            console.print(f"[cyan][*] Fetching archived URLs with GAU...[/]")
-            result = subprocess.run(cmd, input='\n'.join(in_scope_domains), capture_output=True, text=True)
-            
-            if result.returncode == 0:
-                urls = [line.strip() for line in result.stdout.strip().split('\n') if line.strip()]
-                js_urls = [u for u in urls if '.js' in u.lower()]
-                # Strictly filter against scope so out-of-scope archive links are rejected
-                if self.scope_manager:
-                    js_urls = self.scope_manager.filter_urls(js_urls)
-                console.print(f"[green][+] GAU found {len(js_urls)} in-scope JS URLs from archives[/]")
-                return js_urls
-            return []
-                
-        except Exception as e:
-            console.print(f"[red][!] Error running GAU: {e}[/]")
-            return []
+        console.print(f"[cyan][*] Fetching archived URLs with GAU...[/]")
+        stdout = run_bounded_tool(cmd, input_text='\n'.join(in_scope_domains), timeout=60)
+        if stdout:
+            urls = [line.strip() for line in stdout.strip().split('\n') if line.strip()]
+            js_urls = [u for u in urls if '.js' in u.lower()]
+            if self.scope_manager:
+                js_urls = self.scope_manager.filter_urls(js_urls)
+            console.print(f"[green][+] GAU found {len(js_urls)} in-scope JS URLs from archives[/]")
+            return js_urls
+        return []
 
 
 class WaybackurlsIntegration:
@@ -287,22 +333,16 @@ class WaybackurlsIntegration:
         if not in_scope_domains:
             return []
         
-        try:
-            console.print(f"[cyan][*] Fetching Wayback URLs...[/]")
-            result = subprocess.run([self.tool_path], input='\n'.join(in_scope_domains), capture_output=True, text=True)
-            
-            if result.returncode == 0:
-                urls = [line.strip() for line in result.stdout.strip().split('\n') if line.strip()]
-                js_urls = [u for u in urls if '.js' in u.lower()]
-                if self.scope_manager:
-                    js_urls = self.scope_manager.filter_urls(js_urls)
-                console.print(f"[green][+] Waybackurls found {len(js_urls)} in-scope JS URLs[/]")
-                return js_urls
-            return []
-                
-        except Exception as e:
-            console.print(f"[red][!] Error running Waybackurls: {e}[/]")
-            return []
+        console.print(f"[cyan][*] Fetching Wayback URLs...[/]")
+        stdout = run_bounded_tool([self.tool_path], input_text='\n'.join(in_scope_domains), timeout=60)
+        if stdout:
+            urls = [line.strip() for line in stdout.strip().split('\n') if line.strip()]
+            js_urls = [u for u in urls if '.js' in u.lower()]
+            if self.scope_manager:
+                js_urls = self.scope_manager.filter_urls(js_urls)
+            console.print(f"[green][+] Waybackurls found {len(js_urls)} in-scope JS URLs[/]")
+            return js_urls
+        return []
 
 
 class SubJSIntegration:
@@ -329,19 +369,14 @@ class SubJSIntegration:
         if not in_scope:
             return []
 
-        try:
-            console.print(f"[cyan][*] Fetching JS with SubJS...[/]")
-            result = subprocess.run([self.tool_path], input='\n'.join(in_scope), capture_output=True, text=True)
-            
-            if result.returncode == 0:
-                js_urls = [line.strip() for line in result.stdout.strip().split('\n') if line.strip()]
-                if self.scope_manager:
-                    js_urls = self.scope_manager.filter_urls(js_urls)
-                return js_urls
-            return []
-        except Exception as e:
-            console.print(f"[red][!] Error running SubJS: {e}[/]")
-            return []
+        console.print(f"[cyan][*] Fetching JS with SubJS...[/]")
+        stdout = run_bounded_tool([self.tool_path], input_text='\n'.join(in_scope), timeout=60)
+        if stdout:
+            js_urls = [line.strip() for line in stdout.strip().split('\n') if line.strip()]
+            if self.scope_manager:
+                js_urls = self.scope_manager.filter_urls(js_urls)
+            return js_urls
+        return []
 
 
 class HakrawlerIntegration:
@@ -370,20 +405,15 @@ class HakrawlerIntegration:
 
         cmd = [self.tool_path, '-d', str(depth), '-t', '1']
         
-        try:
-            console.print(f"[cyan][*] Running Hakrawler...[/]")
-            result = subprocess.run(cmd, input='\n'.join(in_scope), capture_output=True, text=True)
-            
-            if result.returncode == 0:
-                all_urls = [line.strip() for line in result.stdout.strip().split('\n') if line.strip()]
-                js_urls = [u for u in all_urls if '.js' in u.lower()]
-                if self.scope_manager:
-                    js_urls = self.scope_manager.filter_urls(js_urls)
-                return js_urls
-            return []
-        except Exception as e:
-            console.print(f"[red][!] Error running Hakrawler: {e}[/]")
-            return []
+        console.print(f"[cyan][*] Running Hakrawler...[/]")
+        stdout = run_bounded_tool(cmd, input_text='\n'.join(in_scope), timeout=60)
+        if stdout:
+            all_urls = [line.strip() for line in stdout.strip().split('\n') if line.strip()]
+            js_urls = [u for u in all_urls if '.js' in u.lower()]
+            if self.scope_manager:
+                js_urls = self.scope_manager.filter_urls(js_urls)
+            return js_urls
+        return []
 
 
 class GetJSIntegration:
@@ -412,19 +442,14 @@ class GetJSIntegration:
 
         cmd = [self.tool_path, '--complete']
         
-        try:
-            console.print(f"[cyan][*] Extracting JS with GetJS...[/]")
-            result = subprocess.run(cmd, input='\n'.join(in_scope), capture_output=True, text=True)
-            
-            if result.returncode == 0:
-                js_urls = [line.strip() for line in result.stdout.strip().split('\n') if line.strip()]
-                if self.scope_manager:
-                    js_urls = self.scope_manager.filter_urls(js_urls)
-                return js_urls
-            return []
-        except Exception as e:
-            console.print(f"[red][!] Error running GetJS: {e}[/]")
-            return []
+        console.print(f"[cyan][*] Extracting JS with GetJS...[/]")
+        stdout = run_bounded_tool(cmd, input_text='\n'.join(in_scope), timeout=60)
+        if stdout:
+            js_urls = [line.strip() for line in stdout.strip().split('\n') if line.strip()]
+            if self.scope_manager:
+                js_urls = self.scope_manager.filter_urls(js_urls)
+            return js_urls
+        return []
 
 
 class JSLuiceIntegration:
@@ -443,17 +468,13 @@ class JSLuiceIntegration:
             return []
         
         cmd = [self.tool_path, 'urls']
-        
-        try:
-            result = subprocess.run(cmd, input=js_content, capture_output=True, text=True)
-            if result.returncode == 0:
-                urls = [line.strip() for line in result.stdout.strip().split('\n') if line.strip()]
-                if self.scope_manager:
-                    urls = self.scope_manager.filter_urls(urls)
-                return urls
-            return []
-        except:
-            return []
+        stdout = run_bounded_tool(cmd, input_text=js_content, timeout=60)
+        if stdout:
+            urls = [line.strip() for line in stdout.strip().split('\n') if line.strip()]
+            if self.scope_manager:
+                urls = self.scope_manager.filter_urls(urls)
+            return urls
+        return []
     
     def extract_secrets(self, js_content: str) -> List[dict]:
         """Extract secrets from JS content offline"""
@@ -461,19 +482,15 @@ class JSLuiceIntegration:
             return []
         
         cmd = [self.tool_path, 'secrets']
-        
-        try:
-            result = subprocess.run(cmd, input=js_content, capture_output=True, text=True)
-            if result.returncode == 0:
-                import json
-                secrets = []
-                for line in result.stdout.strip().split('\n'):
-                    if line.strip():
-                        try:
-                            secrets.append(json.loads(line))
-                        except:
-                            pass
-                return secrets
-            return []
-        except:
-            return []
+        stdout = run_bounded_tool(cmd, input_text=js_content, timeout=60)
+        if stdout:
+            import json
+            secrets = []
+            for line in stdout.strip().split('\n'):
+                if line.strip():
+                    try:
+                        secrets.append(json.loads(line))
+                    except:
+                        pass
+            return secrets
+        return []

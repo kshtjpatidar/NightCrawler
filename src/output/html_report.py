@@ -10,6 +10,9 @@ from dataclasses import dataclass
 from datetime import datetime
 import html
 import json
+import re
+from urllib.parse import quote, quote_plus
+from src.core.audit_logger import AuditLogger
 
 
 @dataclass
@@ -227,6 +230,38 @@ class HtmlReportGenerator:
     def __init__(self, config: ReportConfig):
         self.config = config
         self.timestamp = datetime.now()
+
+    def _sanitize_url(self, url: str, secret: Optional[str] = None) -> str:
+        """Sanitize URL by redacting credentials, tokens, and secret parameters."""
+        if not url:
+            return ""
+        clean = AuditLogger.redact_url(url)
+        if secret:
+            masked = mask_secret(secret)
+            clean = clean.replace(secret, masked)
+            clean = clean.replace(quote(secret), masked)
+            clean = clean.replace(quote_plus(secret), masked)
+            try:
+                clean = re.sub(re.escape(secret), masked, clean, flags=re.IGNORECASE)
+            except Exception:
+                pass
+        return clean
+
+    def _sanitize_context(self, context: Optional[str], secret: Optional[str] = None) -> str:
+        """Sanitize finding context by masking any raw or encoded secrets."""
+        if not context:
+            return ""
+        clean = str(context)
+        if secret:
+            masked = mask_secret(secret)
+            clean = clean.replace(secret, masked)
+            clean = clean.replace(quote(secret), masked)
+            clean = clean.replace(quote_plus(secret), masked)
+            try:
+                clean = re.sub(re.escape(secret), masked, clean, flags=re.IGNORECASE)
+            except Exception:
+                pass
+        return clean
     
     def _get_severity_color(self, severity: str) -> str:
         """Get color for severity level"""
@@ -691,6 +726,9 @@ class HtmlReportGenerator:
         for idx, finding in enumerate(findings, 1):
             impact_info = get_impact_info(finding.pattern_name)
             severity = finding.severity() if hasattr(finding, 'severity') else impact_info['severity']
+            safe_url = self._sanitize_url(finding.url, finding.matched_value)
+            safe_ctx = self._sanitize_context(finding.context, finding.matched_value)
+            safe_display_url = safe_url[:80] + ("..." if len(safe_url) > 80 else "")
             
             html_content += f"""
         <div class="finding-card">
@@ -703,7 +741,7 @@ class HtmlReportGenerator:
                 <div class="finding-section">
                     <div class="section-title">Executive Summary</div>
                     <div class="section-content">
-                        A <strong>{severity}</strong> severity {self._escape(finding.pattern_name)} was discovered in the JavaScript source code at <code>{self._escape(finding.url[:80])}</code>. This exposure could allow an attacker to gain unauthorized access to protected resources.
+                        A <strong>{severity}</strong> severity {self._escape(finding.pattern_name)} was discovered in the JavaScript source code at <code>{self._escape(safe_display_url)}</code>. This exposure could allow an attacker to gain unauthorized access to protected resources.
                     </div>
                 </div>
                 
@@ -725,7 +763,7 @@ class HtmlReportGenerator:
                         </tr>
                         <tr>
                             <th>Affected URL</th>
-                            <td class="url-display">{self._escape(finding.url)}</td>
+                            <td class="url-display">{self._escape(safe_url)}</td>
                         </tr>
                         {"<tr><th>Line Number</th><td>" + str(finding.line_number) + "</td></tr>" if finding.line_number else ""}
                     </table>
@@ -741,14 +779,14 @@ class HtmlReportGenerator:
                     <div class="section-title">Proof of Concept</div>
                     <p style="margin-bottom: 10px; color: #94a3b8;">Secret Value Found (Masked for Security):</p>
                     <div class="code-block">{self._escape(mask_secret(finding.matched_value))}</div>
-                    {f'<p style="margin-top: 15px; color: #94a3b8;">Context:</p><div class="code-block">{self._escape(finding.context.replace(finding.matched_value, mask_secret(finding.matched_value)) if finding.matched_value in finding.context else finding.context)}</div>' if finding.context else ''}
+                    {f'<p style="margin-top: 15px; color: #94a3b8;">Context:</p><div class="code-block">{self._escape(safe_ctx)}</div>' if safe_ctx else ''}
                 </div>
                 
                 <!-- Steps to Reproduce -->
                 <div class="finding-section">
                     <div class="section-title">Steps to Reproduce</div>
                     <ol class="steps-list">
-                        <li>Navigate to the target URL: <code>{self._escape(finding.url)}</code></li>
+                        <li>Navigate to the target URL: <code>{self._escape(safe_url)}</code></li>
                         <li>Open browser developer tools (F12) and go to the Sources tab</li>
                         <li>Search for the exposed secret using Ctrl+F</li>
                         <li>Locate the secret at {f"line {finding.line_number}" if finding.line_number else "the matched location"}</li>
@@ -862,7 +900,8 @@ class HtmlReportGenerator:
             priority = {"CRITICAL": "P1", "HIGH": "P2", "MEDIUM": "P3", "LOW": "P4"}.get(severity, "P3")
             masked_val = mask_secret(finding.matched_value)
             line_str = f"Line {finding.line_number}" if finding.line_number else "Location within bundle"
-            masked_ctx = finding.context.replace(finding.matched_value, masked_val) if (finding.context and finding.matched_value in finding.context) else (finding.context or "N/A")
+            safe_url = self._sanitize_url(finding.url, finding.matched_value)
+            masked_ctx = self._sanitize_context(finding.context, finding.matched_value) or "N/A"
             
             html_content += f"""
         <div class="finding-card">
@@ -878,7 +917,7 @@ class HtmlReportGenerator:
 
                 <div class="finding-section">
                     <div class="section-title">Affected Asset</div>
-                    <div class="section-content"><code>{self._escape(finding.url)}</code></div>
+                    <div class="section-content"><code>{self._escape(safe_url)}</code></div>
                 </div>
 
                 <div class="finding-section">
@@ -911,7 +950,7 @@ class HtmlReportGenerator:
                 <div class="finding-section">
                     <div class="section-title">Reproduction Steps</div>
                     <ol class="steps-list" style="margin-left: 20px; padding-left: 10px;">
-                        <li>Fetch the target JavaScript file: <code>curl -s "{self._escape(finding.url)}"</code></li>
+                        <li>Fetch the target JavaScript file: <code>curl -s "{self._escape(safe_url)}"</code></li>
                         <li>Search for the pattern or inspect <code>{line_str}</code>.</li>
                         <li>Observe the exposed credential token in source: <code>{self._escape(masked_val)}</code></li>
                     </ol>
@@ -939,7 +978,7 @@ class HtmlReportGenerator:
                 <div class="finding-section">
                     <div class="section-title">Evidence References</div>
                     <table class="info-table">
-                        <tr><th>Source Asset</th><td class="url-display">{self._escape(finding.url)}</td></tr>
+                        <tr><th>Source Asset</th><td class="url-display">{self._escape(safe_url)}</td></tr>
                         <tr><th>Line Number</th><td>{self._escape(str(finding.line_number or 'N/A'))}</td></tr>
                         <tr><th>Masked Evidence</th><td class="code-block">{self._escape(masked_val)}</td></tr>
                         <tr><th>Surrounding Context</th><td class="code-block">{self._escape(masked_ctx)}</td></tr>
@@ -1045,6 +1084,7 @@ class HtmlReportGenerator:
         for idx, finding in enumerate(findings, 1):
             impact_info = get_impact_info(finding.pattern_name)
             severity = finding.severity() if hasattr(finding, 'severity') else impact_info['severity']
+            safe_url = self._sanitize_url(finding.url, finding.matched_value)
             
             html_content += f"""
         <div class="finding-card">
@@ -1055,7 +1095,7 @@ class HtmlReportGenerator:
             <div class="finding-body">
                 <table class="info-table">
                     <tr><th>Type</th><td>{self._escape(finding.category)} - {self._escape(finding.pattern_name)}</td></tr>
-                    <tr><th>Location</th><td class="url-display">{self._escape(finding.url)}</td></tr>
+                    <tr><th>Location</th><td class="url-display">{self._escape(safe_url)}</td></tr>
                     <tr><th>Confidence</th><td>{finding.confidence}%</td></tr>
                     <tr><th>CVSS</th><td>{impact_info['cvss']}</td></tr>
                 </table>
@@ -1127,11 +1167,12 @@ class HtmlReportGenerator:
             impact_info = get_impact_info(pattern_name)
             priority = {"CRITICAL": "P1", "HIGH": "P2", "MEDIUM": "P3", "LOW": "P4"}.get(sev, "P3")
             masked_val = mask_secret(matched_val)
-            masked_ctx = context.replace(matched_val, masked_val) if (context and matched_val in context) else (context or "N/A")
+            safe_url = self._sanitize_url(url, matched_val)
+            masked_ctx = self._sanitize_context(context, matched_val) or "N/A"
 
             vulnerabilities.append({
                 "vulnerability_title": f"[{priority}] Potential {pattern_name} Exposure in Client-Side JavaScript",
-                "affected_asset": url,
+                "affected_asset": safe_url,
                 "vulnerability_category": "Server Security Misconfiguration > Sensitive Data Exposure",
                 "severity": f"{priority} - {sev}",
                 "cvss_score": impact_info['cvss'],
@@ -1158,7 +1199,7 @@ class HtmlReportGenerator:
                 ),
                 "preconditions": "Unauthenticated HTTPS network access to target asset.",
                 "reproduction_steps": [
-                    f"Fetch the target JavaScript file: curl -s \"{url}\"",
+                    f"Fetch the target JavaScript file: curl -s \"{safe_url}\"",
                     f"Inspect line {line_num or 'within bundle'}",
                     f"Observe potential pattern match (masked): {masked_val}"
                 ],
@@ -1166,7 +1207,7 @@ class HtmlReportGenerator:
                 "actual_result": f"Found potential secret matching pattern '{pattern_name}'. Masked token: {masked_val}",
                 "security_impact": impact_info['impact'],
                 "evidence_references": {
-                    "source_url": url,
+                    "source_url": safe_url,
                     "line_number": line_num,
                     "masked_evidence": masked_val,
                     "context": masked_ctx
@@ -1177,8 +1218,9 @@ class HtmlReportGenerator:
         endpoints_data = []
         if scan_result and hasattr(scan_result, 'discovered_endpoints') and scan_result.discovered_endpoints:
             for ep in scan_result.discovered_endpoints:
+                raw_ep = ep.url_or_path if hasattr(ep, 'url_or_path') else (ep.get('url_or_path') if isinstance(ep, dict) else str(ep))
                 endpoints_data.append({
-                    "url_or_path": ep.url_or_path if hasattr(ep, 'url_or_path') else (ep.get('url_or_path') if isinstance(ep, dict) else str(ep)),
+                    "url_or_path": AuditLogger.redact_url(raw_ep),
                     "method": ep.method if hasattr(ep, 'method') else (ep.get('method', 'GET') if isinstance(ep, dict) else "GET"),
                     "parameters": ep.parameters if hasattr(ep, 'parameters') else (ep.get('parameters', []) if isinstance(ep, dict) else []),
                     "endpoint_type": ep.endpoint_type if hasattr(ep, 'endpoint_type') else (ep.get('endpoint_type', 'general') if isinstance(ep, dict) else "general"),

@@ -242,14 +242,48 @@ class EffectivePolicy:
         if effective_strict_scope and not effective_verify_tls:
             raise ValueError("Insecure TLS configuration is prohibited in strict compliance mode.")
 
-        # External Providers & Side Effects
-        auth_providers = set(overrides.get("authorized_providers") or [])
-        if profile and hasattr(profile, "authorized_providers") and profile.authorized_providers:
-            auth_providers.update(profile.authorized_providers)
-        allow_state_changing = bool(overrides.get("allow_state_changing", False))
+        # External Providers Precedence
+        profile_providers = set(getattr(profile, "authorized_providers", []) or []) if profile else set()
+        if "authorized_providers" in overrides and overrides["authorized_providers"] is not None:
+            cli_providers_raw = overrides["authorized_providers"]
+            cli_providers = {str(p).strip().lower() for p in cli_providers_raw if str(p).strip()}
+            if profile:
+                unauthorized_additions = cli_providers - profile_providers
+                if unauthorized_additions:
+                    raise ValueError(
+                        f"CLI cannot expand program '{profile.id}' authorized providers with {sorted(unauthorized_additions)}. "
+                        f"Only providers explicitly authorized by the program profile ({sorted(profile_providers) or 'None'}) are permitted."
+                    )
+                auth_providers = cli_providers
+            else:
+                auth_providers = cli_providers
+        else:
+            auth_providers = profile_providers
+
+        # State-Changing Operations Precedence
+        if "allow_state_changing" in overrides and overrides["allow_state_changing"] is not None:
+            cli_state_changing = strict_bool(overrides["allow_state_changing"], "allow_state_changing")
+        else:
+            cli_state_changing = None
+
+        profile_state_changing = False
+        if profile and hasattr(profile, "testing_permissions") and profile.testing_permissions:
+            profile_state_changing = getattr(profile.testing_permissions, "state_changing_allowed", False)
+            if not profile.testing_permissions.credential_validation:
+                profile_state_changing = False
+
+        if cli_state_changing is True:
+            if profile and not profile_state_changing:
+                raise ValueError(
+                    f"Program profile '{profile.id}' does not authorize state-changing validation operations. "
+                    "CLI override cannot enable state-changing operations against program restrictions."
+                )
+            allow_state_changing = True
+        else:
+            allow_state_changing = cli_state_changing if cli_state_changing is not None else profile_state_changing
 
         # Scope additions and narrowing
-        if overrides.get("allowed_domains"):
+        if "allowed_domains" in overrides and overrides["allowed_domains"] is not None:
             if profile:
                 profile_scope = ScopeManager.from_profile(profile)
                 narrowed = []
@@ -268,10 +302,7 @@ class EffectivePolicy:
                     raise ValueError(f"Target scope cannot be empty after narrowing program '{profile.id}' scope.")
                 allowed_domains = narrowed
             else:
-                for d in overrides["allowed_domains"]:
-                    d_str = str(d).strip()
-                    if d_str and d_str not in allowed_domains:
-                        allowed_domains.append(d_str)
+                allowed_domains = [str(d).strip() for d in overrides["allowed_domains"] if str(d).strip()]
 
         if overrides.get("excluded_domains"):
             for d in overrides["excluded_domains"]:
@@ -293,7 +324,10 @@ class EffectivePolicy:
             reporter_email = str(overrides["reporter_email"])
 
         # Credential validation check
-        validate_keys_requested = bool(overrides.get("validate_keys", False))
+        if "validate_keys" in overrides and overrides["validate_keys"] is not None:
+            validate_keys_requested = strict_bool(overrides["validate_keys"], "validate_keys")
+        else:
+            validate_keys_requested = False
         if profile:
             # Policy check: is credential validation permitted by program profile?
             perm = TestingPermissionManager.from_profile(profile, allow_credential_validation=validate_keys_requested)

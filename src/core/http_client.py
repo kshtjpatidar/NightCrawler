@@ -159,24 +159,155 @@ class NightCrawlerHttpClient:
         # Policy-aware DNS Resolver instance
         self._resolver = PolicyAwareResolver(self)
 
+    @staticmethod
+    def _normalize_hostname(host: Optional[str]) -> str:
+        """
+        Normalize hostname safely:
+        - Strip whitespace, trailing dots, userinfo, and port.
+        - Lowercase.
+        - Convert Unicode/IDNA to ASCII punycode.
+        """
+        if not host:
+            return ""
+        clean = str(host).strip().rstrip(".").lower()
+        if "@" in clean:
+            clean = clean.split("@")[-1]
+        if ":" in clean:
+            if not clean.startswith("[") and clean.count(":") == 1:
+                clean = clean.split(":")[0]
+            elif clean.startswith("[") and "]" in clean:
+                clean = clean[1:clean.index("]")]
+        try:
+            clean = clean.encode("idna").decode("ascii")
+        except Exception:
+            pass
+        return clean
+
     def is_provider_authorized(self, provider: str, url: str) -> bool:
-        """Check if an external provider or URL is authorized for this client."""
-        if not provider:
+        """
+        Check if an external provider or URL is authorized for this client.
+        Enforces strict hostname boundary matching (no substring or suffix confusion).
+        Prevents lookalike domains, unnormalized Unicode, alternate ports, and IP bypasses.
+        """
+        if not provider or not url:
             return False
         if self.authorized_providers is None:
-            # When client does not restrict providers, honor caller-authorized provider
             return True
         if "*" in self.authorized_providers or "all" in self.authorized_providers:
             return True
-        p_lower = provider.lower()
-        if p_lower in self.authorized_providers:
-            return True
+
         parsed = urlparse(url)
-        host = (parsed.hostname or "").lower()
-        for ap in self.authorized_providers:
-            ap_clean = ap.lower().lstrip(".*")
-            if ap_clean and (host == ap_clean or host.endswith("." + ap_clean) or ap_clean in host):
-                return True
+        raw_host = parsed.hostname or ""
+        host = self._normalize_hostname(raw_host)
+        if not host:
+            return False
+
+        # Disallow IP addresses from matching domain names
+        is_ip = False
+        try:
+            ipaddress.ip_address(host)
+            is_ip = True
+        except ValueError:
+            pass
+
+        p_lower = provider.strip().lower()
+        normalized_authorized = {p.strip().lower() for p in self.authorized_providers if p.strip()}
+
+        # Known third-party provider official domains
+        provider_domains = {
+            "google": ["googleapis.com", "google.com"],
+            "firebase": ["googleapis.com", "firebaseio.com"],
+            "slack": ["slack.com"],
+            "stripe": ["stripe.com"],
+            "github": ["github.com"],
+            "gitlab": ["gitlab.com"],
+            "aws": ["amazonaws.com"],
+            "mailgun": ["mailgun.net", "mailgun.com"],
+            "sendgrid": ["sendgrid.com"],
+            "twilio": ["twilio.com"],
+            "segment": ["segment.io", "segment.com"],
+            "datadog": ["datadoghq.com"],
+            "sentry": ["sentry.io"],
+            "anthropic": ["anthropic.com"],
+            "openai": ["openai.com"],
+            "circleci": ["circleci.com"],
+            "travis": ["travis-ci.com", "travis-ci.org"],
+            "npm": ["npmjs.org", "npmjs.com"],
+            "discord": ["discord.com"],
+            "telegram": ["telegram.org"],
+            "mailchimp": ["mailchimp.com"],
+            "heroku": ["heroku.com"],
+            "digitalocean": ["digitalocean.com"],
+            "cloudflare": ["cloudflare.com"],
+            "vercel": ["vercel.com"],
+            "netlify": ["netlify.com"],
+            "newrelic": ["newrelic.com"],
+            "pagerduty": ["pagerduty.com"],
+            "shodan": ["shodan.io"],
+            "virustotal": ["virustotal.com"],
+            "censys": ["censys.io"],
+            "algolia": ["algolia.net", "algolianet.com"],
+            "mapbox": ["mapbox.com"],
+            "hubspot": ["hubapi.com", "hubspot.com"],
+            "asana": ["asana.com"],
+            "zendesk": ["zendesk.com"],
+            "grafana": ["grafana.com"],
+            "spotify": ["spotify.com"],
+            "notion": ["notion.com", "notion.so"],
+            "figma": ["figma.com"],
+            "airtable": ["airtable.com"],
+            "linear": ["linear.app"],
+            "atlassian": ["atlassian.net"],
+            "jira": ["atlassian.net"],
+            "confluence": ["atlassian.net"],
+            "supabase": ["supabase.co"],
+            "planetscale": ["planetscale.com"],
+            "clerk": ["clerk.com"],
+            "auth0": ["auth0.com"],
+            "plaid": ["plaid.com"],
+            "loom": ["loom.com"],
+            "postman": ["getpostman.com", "postman.com"],
+            "mixpanel": ["mixpanel.com"],
+            "amplitude": ["amplitude.com"],
+            "launchdarkly": ["launchdarkly.com"],
+            "intercom": ["intercom.io"],
+            "freshdesk": ["freshdesk.com"],
+            "dropbox": ["dropboxapi.com", "dropbox.com"],
+            "box": ["box.com"],
+            "monday": ["monday.com"],
+            "clickup": ["clickup.com"],
+            "trello": ["trello.com"],
+            "bitly": ["bitly.com", "api-ssl.bitly.com"],
+            "rapidapi": ["geoapify.com", "rapidapi.com"],
+            "cohere": ["cohere.ai"],
+            "replicate": ["replicate.com"],
+            "pinecone": ["pinecone.io"],
+            "weaviate": ["weaviate.network", "weaviate.io"],
+            "braintree": ["braintreegateway.com"],
+            "square": ["squareup.com"],
+            "razorpay": ["razorpay.com"],
+        }
+
+        for ap in normalized_authorized:
+            ap_clean = self._normalize_hostname(ap.lstrip(".*"))
+            if not ap_clean:
+                continue
+
+            # Case A: ap is a domain name
+            if "." in ap_clean:
+                if is_ip:
+                    continue
+                if host == ap_clean or host.endswith("." + ap_clean):
+                    return True
+            else:
+                # Case B: ap is a provider identifier
+                if p_lower == ap_clean:
+                    if not is_ip:
+                        domains = provider_domains.get(ap_clean, [f"{ap_clean}.com"])
+                        for d in domains:
+                            d_norm = self._normalize_hostname(d)
+                            if host == d_norm or host.endswith("." + d_norm):
+                                return True
         return False
 
     def get_resolver(self) -> aiohttp.abc.AbstractResolver:

@@ -102,9 +102,26 @@ class ReportManager:
 
             masked_val = mask_secret(matched_val)
             safe_url = AuditLogger.redact_url(url)
-            if matched_val and matched_val in safe_url:
+            if matched_val:
+                from urllib.parse import quote, quote_plus
                 safe_url = safe_url.replace(matched_val, masked_val)
-            masked_ctx = context.replace(matched_val, masked_val) if (context and matched_val in context) else (context or "N/A")
+                safe_url = safe_url.replace(quote(matched_val), masked_val)
+                safe_url = safe_url.replace(quote_plus(matched_val), masked_val)
+                try:
+                    safe_url = re.sub(re.escape(matched_val), masked_val, safe_url, flags=re.IGNORECASE)
+                except Exception:
+                    pass
+
+            masked_ctx = context or "N/A"
+            if context and matched_val:
+                from urllib.parse import quote, quote_plus
+                masked_ctx = masked_ctx.replace(matched_val, masked_val)
+                masked_ctx = masked_ctx.replace(quote(matched_val), masked_val)
+                masked_ctx = masked_ctx.replace(quote_plus(matched_val), masked_val)
+                try:
+                    masked_ctx = re.sub(re.escape(matched_val), masked_val, masked_ctx, flags=re.IGNORECASE)
+                except Exception:
+                    pass
 
             impact = get_impact_info(p_name)
             priority = {"CRITICAL": "P1", "HIGH": "P2", "MEDIUM": "P3", "LOW": "P4"}.get(sev, "P3")
@@ -145,8 +162,9 @@ class ReportManager:
         endpoints = []
         if scan_result and hasattr(scan_result, 'discovered_endpoints') and scan_result.discovered_endpoints:
             for ep in scan_result.discovered_endpoints:
+                raw_ep = ep.url_or_path if hasattr(ep, 'url_or_path') else str(ep)
                 endpoints.append({
-                    "url_or_path": ep.url_or_path if hasattr(ep, 'url_or_path') else str(ep),
+                    "url_or_path": AuditLogger.redact_url(raw_ep),
                     "method": getattr(ep, 'method', 'GET'),
                     "parameters": getattr(ep, 'parameters', []),
                     "type": getattr(ep, 'endpoint_type', 'general')
