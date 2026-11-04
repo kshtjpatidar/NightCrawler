@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from typing import Dict, Any, List, Optional, Set
 
 from src.core.program_profile import (
-    ProgramProfile, PolicyValidator, strict_bool, strict_positive_float, strict_positive_int
+    ProgramProfile, PolicyValidator, strict_bool, strict_positive_float, strict_positive_int, parse_authorized_providers
 )
 from src.core.scope import ScopeManager
 from src.core.request_policy import RequestPolicyManager
@@ -80,6 +80,15 @@ class EffectivePolicy:
         applying permitted CLI overrides under strict policy validation rules.
         """
         overrides = cli_overrides or {}
+        allowed_cli_keys = {
+            "concurrency", "depth", "timeout", "max_rps", "verify_tls", "strict_scope",
+            "scope_enabled", "allowed_domains", "excluded_domains", "header_name",
+            "header_value", "template", "reporter", "reporter_email", "validate_keys",
+            "allow_state_changing", "authorized_providers", "confirm_review"
+        }
+        unknown_cli = set(overrides.keys()) - allowed_cli_keys
+        if unknown_cli:
+            raise ValueError(f"Unknown CLI override option(s): {sorted(unknown_cli)}.")
 
         # 1. Base Resolution
         if profile:
@@ -246,7 +255,8 @@ class EffectivePolicy:
         profile_providers = set(getattr(profile, "authorized_providers", []) or []) if profile else set()
         if "authorized_providers" in overrides and overrides["authorized_providers"] is not None:
             cli_providers_raw = overrides["authorized_providers"]
-            cli_providers = {str(p).strip().lower() for p in cli_providers_raw if str(p).strip()}
+            cli_providers_list = parse_authorized_providers(cli_providers_raw, context="CLI overrides")
+            cli_providers = set(cli_providers_list)
             if profile:
                 unauthorized_additions = cli_providers - profile_providers
                 if unauthorized_additions:
@@ -280,7 +290,7 @@ class EffectivePolicy:
                 )
             allow_state_changing = True
         else:
-            allow_state_changing = cli_state_changing if cli_state_changing is not None else profile_state_changing
+            allow_state_changing = False
 
         # Scope additions and narrowing
         if "allowed_domains" in overrides and overrides["allowed_domains"] is not None:

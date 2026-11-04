@@ -15,7 +15,7 @@ import ssl
 import socket
 import ipaddress
 from typing import Optional, Dict, Tuple, Any, List, Set
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urljoin, urlparse, unquote
 import aiohttp
 import aiohttp.abc
 import aiohttp.resolver
@@ -24,6 +24,7 @@ from src.core.scope import ScopeManager
 from src.core.rate_limiter import GlobalRateLimiter
 from src.core.header_manager import HeaderManager
 from src.core.audit_logger import AuditLogger
+from src.core.program_profile import parse_authorized_providers
 
 logger = logging.getLogger("nightcrawler.http")
 
@@ -120,7 +121,7 @@ class NightCrawlerHttpClient:
             self.strict_mode = effective_policy.strict_scope
             self.max_redirects = max_redirects
             self.max_retries = max_retries
-            self.authorized_providers = set(getattr(effective_policy, "authorized_providers", set()))
+            self.authorized_providers = set(getattr(effective_policy, "authorized_providers", set()) or set())
             if authorized_providers:
                 self.authorized_providers.update(authorized_providers)
         else:
@@ -142,7 +143,13 @@ class NightCrawlerHttpClient:
             self.strict_mode = strict_mode
             self.max_redirects = max_redirects
             self.max_retries = max_retries
-            self.authorized_providers = set(authorized_providers) if authorized_providers is not None else None
+            if authorized_providers is not None:
+                try:
+                    self.authorized_providers = set(parse_authorized_providers(authorized_providers, context="HttpClient"))
+                except Exception:
+                    self.authorized_providers = set()
+            else:
+                self.authorized_providers = set()
 
         if self.strict_mode and not self.verify_tls:
             raise ValueError("Insecure TLS configuration is prohibited in strict compliance mode.")
@@ -164,12 +171,19 @@ class NightCrawlerHttpClient:
         """
         Normalize hostname safely:
         - Strip whitespace, trailing dots, userinfo, and port.
+        - Decode percent-encoding.
         - Lowercase.
         - Convert Unicode/IDNA to ASCII punycode.
         """
         if not host:
             return ""
-        clean = str(host).strip().rstrip(".").lower()
+        clean = str(host).strip().rstrip(".")
+        if "%" in clean:
+            try:
+                clean = unquote(clean).rstrip(".")
+            except Exception:
+                pass
+        clean = clean.lower()
         if "@" in clean:
             clean = clean.split("@")[-1]
         if ":" in clean:
@@ -188,30 +202,51 @@ class NightCrawlerHttpClient:
         Check if an external provider or URL is authorized for this client.
         Enforces strict hostname boundary matching (no substring or suffix confusion).
         Prevents lookalike domains, unnormalized Unicode, alternate ports, and IP bypasses.
+        Fails closed on missing, empty, malformed, or wrong-type provider/URL/allowlist.
         """
-        if not provider or not url:
+        if not provider or not isinstance(provider, str) or not provider.strip():
             return False
-        if self.authorized_providers is None:
-            return True
-        if "*" in self.authorized_providers or "all" in self.authorized_providers:
-            return True
+        if not url or not isinstance(url, str) or not url.strip():
+            return False
+        if not self.authorized_providers or not isinstance(self.authorized_providers, (set, list, tuple)):
+            return False
 
-        parsed = urlparse(url)
+        try:
+            parsed = urlparse(url.strip())
+        except Exception:
+            return False
+
+        # Reject unsupported schemes (must be http or https)
+        if parsed.scheme.lower() not in ("http", "https"):
+            return False
+
+        # Reject userinfo tricks (e.g. https://slack.com@evil.com/ or https://user:pass@slack.com/)
+        if parsed.username or parsed.password:
+            return False
+
         raw_host = parsed.hostname or ""
+        if not raw_host:
+            return False
+
         host = self._normalize_hostname(raw_host)
         if not host:
             return False
 
-        # Disallow IP addresses from matching domain names
-        is_ip = False
+        # Disallow IP literals (IPv4 and IPv6) from matching provider domain names
         try:
             ipaddress.ip_address(host)
-            is_ip = True
+            return False
         except ValueError:
             pass
 
         p_lower = provider.strip().lower()
-        normalized_authorized = {p.strip().lower() for p in self.authorized_providers if p.strip()}
+        try:
+            normalized_authorized = set(parse_authorized_providers(self.authorized_providers, context="HttpClient"))
+        except Exception:
+            return False
+
+        if not normalized_authorized:
+            return False
 
         # Known third-party provider official domains
         provider_domains = {
@@ -243,6 +278,10 @@ class NightCrawlerHttpClient:
             "netlify": ["netlify.com"],
             "newrelic": ["newrelic.com"],
             "pagerduty": ["pagerduty.com"],
+            "facebook": ["facebook.com", "graph.facebook.com"],
+            "twitter": ["twitter.com", "api.twitter.com", "x.com"],
+            "instagram": ["instagram.com", "graph.instagram.com"],
+            "linkedin": ["linkedin.com", "api.linkedin.com"],
             "shodan": ["shodan.io"],
             "virustotal": ["virustotal.com"],
             "censys": ["censys.io"],
@@ -288,26 +327,27 @@ class NightCrawlerHttpClient:
             "razorpay": ["razorpay.com"],
         }
 
-        for ap in normalized_authorized:
-            ap_clean = self._normalize_hostname(ap.lstrip(".*"))
+        for ap_clean in normalized_authorized:
             if not ap_clean:
                 continue
 
-            # Case A: ap is a domain name
+            # Case A: ap_clean is a domain name (contains '.')
             if "." in ap_clean:
-                if is_ip:
+                parts = [p for p in ap_clean.split(".") if p]
+                if len(parts) < 2:
                     continue
                 if host == ap_clean or host.endswith("." + ap_clean):
                     return True
             else:
-                # Case B: ap is a provider identifier
+                # Case B: ap_clean is a provider identifier (e.g. 'slack')
                 if p_lower == ap_clean:
-                    if not is_ip:
-                        domains = provider_domains.get(ap_clean, [f"{ap_clean}.com"])
-                        for d in domains:
-                            d_norm = self._normalize_hostname(d)
-                            if host == d_norm or host.endswith("." + d_norm):
-                                return True
+                    domains = provider_domains.get(ap_clean, [f"{ap_clean}.com"])
+                    for d in domains:
+                        d_norm = self._normalize_hostname(d)
+                        if not d_norm or "." not in d_norm:
+                            continue
+                        if host == d_norm or host.endswith("." + d_norm):
+                            return True
         return False
 
     def get_resolver(self) -> aiohttp.abc.AbstractResolver:
@@ -509,7 +549,7 @@ class NightCrawlerHttpClient:
                 is_curr_in_scope = self.scope_manager.is_url_in_scope(current_url)
                 if not is_curr_in_scope:
                     if not (authorized_provider and self.is_provider_authorized(authorized_provider, current_url)):
-                        logger.warning(f"[Scope] URL {AuditLogger.redact_url(current_url)} is out of scope. Aborting attempt.")
+                        logger.warning(f"[Scope] URL {AuditLogger.redact_url(current_url)} is out of scope and not an authorized provider. Aborting attempt.")
                         if self.audit_logger:
                             host = self.scope_manager.extract_hostname(current_url) or "unknown"
                             self.audit_logger.log_event(
@@ -520,16 +560,6 @@ class NightCrawlerHttpClient:
                                 policy_decision="DENIED"
                             )
                         return None, None, current_url
-                    if self.audit_logger:
-                        host = self.scope_manager.extract_hostname(current_url) or "unknown"
-                        self.audit_logger.log_event(
-                            target_host=host,
-                            method=current_method,
-                            url=current_url,
-                            scope_decision="BLOCKED",
-                            policy_decision="DENIED"
-                        )
-                    return None, None, current_url
 
                 # Validate destination IP safety before sending network request
                 host = self.scope_manager.extract_hostname(current_url)

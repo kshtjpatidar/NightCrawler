@@ -160,6 +160,11 @@ def load_config(config_file: Optional[str] = None) -> NightCrawlerConfig:
         elif not isinstance(data, dict):
             raise ValueError(f"Configuration file '{target_path}' must contain a YAML mapping/dictionary.")
 
+        allowed_sections = {"scope", "researcher", "scan", "features", "report"}
+        unknown_sections = set(data.keys()) - allowed_sections
+        if unknown_sections:
+            raise ValueError(f"Unknown configuration section(s) in '{target_path}': {sorted(unknown_sections)}.")
+
         # Scope
         scope = data.get("scope", {})
         if "enabled" in scope:
@@ -221,15 +226,9 @@ def load_config(config_file: Optional[str] = None) -> NightCrawlerConfig:
         cfg.header_value = env_researcher_id
 
     if os.getenv("NIGHTCRAWLER_MAX_RPS"):
-        try:
-            cfg.max_requests_per_second = strict_positive_float(os.getenv("NIGHTCRAWLER_MAX_RPS"), "NIGHTCRAWLER_MAX_RPS")
-        except (ValueError, TypeError):
-            pass
+        cfg.max_requests_per_second = strict_positive_float(os.getenv("NIGHTCRAWLER_MAX_RPS"), "NIGHTCRAWLER_MAX_RPS")
 
     if os.getenv("NIGHTCRAWLER_CONCURRENCY"):
-        try:
-            cfg.concurrency = strict_positive_int(os.getenv("NIGHTCRAWLER_CONCURRENCY"), "NIGHTCRAWLER_CONCURRENCY")
-        except (ValueError, TypeError):
-            pass
+        cfg.concurrency = strict_positive_int(os.getenv("NIGHTCRAWLER_CONCURRENCY"), "NIGHTCRAWLER_CONCURRENCY")
 
     return cfg

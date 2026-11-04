@@ -25,6 +25,7 @@ from src.validators.keyhacks import (
     KeyHacksValidator,
     ValidationResult,
     ValidationStatus,
+    ValidationSideEffect,
     validate_key,
 )
 
@@ -59,7 +60,7 @@ async def test_missing_scope_manager_blocks_http_validation():
         validator.validate_policy_dependencies()
     assert "scopemanager is missing" in str(exc_info.value).lower()
 
-    cfg = {"type": "http", "method": "GET", "url": "https://example.com/api?key={key}", "success_indicators": ["ok"]}
+    cfg = {"type": "http", "side_effect": ValidationSideEffect.READ_ONLY, "method": "GET", "url": "https://example.com/api?key={key}", "success_indicators": ["ok"]}
     with patch("aiohttp.ClientSession.get") as mock_get:
         with pytest.raises(KeyHacksPolicyError):
             await validator.validate_http(cfg, "secret123")
@@ -77,7 +78,7 @@ async def test_missing_request_policy_manager_blocks_http_validation():
         validator.validate_policy_dependencies()
     assert "requestpolicymanager is missing" in str(exc_info.value).lower()
 
-    cfg = {"type": "http", "method": "GET", "url": "https://example.com/api?key={key}", "success_indicators": ["ok"]}
+    cfg = {"type": "http", "side_effect": ValidationSideEffect.READ_ONLY, "method": "GET", "url": "https://example.com/api?key={key}", "success_indicators": ["ok"]}
     with patch("aiohttp.ClientSession.get") as mock_get:
         with pytest.raises(KeyHacksPolicyError):
             await validator.validate_http(cfg, "secret123")
@@ -95,7 +96,7 @@ async def test_missing_policy_transport_blocks_http_validation():
         validator.validate_policy_dependencies()
     assert "httpclient is missing" in str(exc_info.value).lower()
 
-    cfg = {"type": "http", "method": "GET", "url": "https://example.com/api?key={key}", "success_indicators": ["ok"]}
+    cfg = {"type": "http", "side_effect": ValidationSideEffect.READ_ONLY, "method": "GET", "url": "https://example.com/api?key={key}", "success_indicators": ["ok"]}
     with patch("aiohttp.ClientSession.get") as mock_get:
         with pytest.raises(KeyHacksPolicyError):
             await validator.validate_http(cfg, "secret123")
@@ -115,7 +116,7 @@ async def test_missing_dns_resolver_blocks_http_validation():
         validator.validate_policy_dependencies()
     assert "dns resolver is missing" in str(exc_info.value).lower()
 
-    cfg = {"type": "http", "method": "GET", "url": "https://example.com/api?key={key}", "success_indicators": ["ok"]}
+    cfg = {"type": "http", "side_effect": ValidationSideEffect.READ_ONLY, "method": "GET", "url": "https://example.com/api?key={key}", "success_indicators": ["ok"]}
     with patch("aiohttp.ClientSession.get") as mock_get:
         with pytest.raises(KeyHacksPolicyError):
             await validator.validate_http(cfg, "secret123")
@@ -135,7 +136,7 @@ async def test_missing_rate_limiter_blocks_http_validation():
         validator.validate_policy_dependencies()
     assert "ratelimiter is missing" in str(exc_info.value).lower()
 
-    cfg = {"type": "http", "method": "GET", "url": "https://example.com/api?key={key}", "success_indicators": ["ok"]}
+    cfg = {"type": "http", "side_effect": ValidationSideEffect.READ_ONLY, "method": "GET", "url": "https://example.com/api?key={key}", "success_indicators": ["ok"]}
     with patch("aiohttp.ClientSession.get") as mock_get:
         with pytest.raises(KeyHacksPolicyError):
             await validator.validate_http(cfg, "secret123")
@@ -146,7 +147,7 @@ async def test_missing_rate_limiter_blocks_http_validation():
 async def test_incomplete_policy_never_creates_fallback_session():
     """Verify that incomplete policy dependencies never create an unrestricted fallback session."""
     validator = KeyHacksValidator()
-    cfg = {"type": "http", "method": "GET", "url": "https://example.com/api?key={key}", "success_indicators": ["ok"]}
+    cfg = {"type": "http", "side_effect": ValidationSideEffect.READ_ONLY, "method": "GET", "url": "https://example.com/api?key={key}", "success_indicators": ["ok"]}
 
     with patch("aiohttp.ClientSession.__init__", return_value=None) as mock_init:
         with pytest.raises(KeyHacksPolicyError):
@@ -173,7 +174,7 @@ async def test_out_of_scope_initial_url_never_reaches_transport():
     validator = KeyHacksValidator(scope_manager=scope, request_policy_manager=rpm, http_client=client)
 
     cfg = {
-        "type": "http",
+        "type": "http", "side_effect": ValidationSideEffect.READ_ONLY,
         "method": "GET",
         "url": "https://unauthorized-external-domain.com/check?key={key}",
         "success_indicators": ["ok"]
@@ -195,7 +196,7 @@ async def test_out_of_scope_redirect_is_rejected():
     validator = KeyHacksValidator(scope_manager=scope, request_policy_manager=rpm, http_client=client)
 
     cfg = {
-        "type": "http",
+        "type": "http", "side_effect": ValidationSideEffect.READ_ONLY,
         "method": "GET",
         "url": "https://example.com/check?key={key}",
         "success_indicators": ["valid"]
@@ -242,7 +243,7 @@ async def test_cross_origin_redirect_does_not_leak_auth_headers():
 
     with patch("aiohttp.ClientSession.get", side_effect=mock_get):
         cfg = {
-            "type": "http",
+            "type": "http", "side_effect": ValidationSideEffect.READ_ONLY,
             "method": "GET",
             "url": "https://example.com/init",
             "headers": {
@@ -281,7 +282,7 @@ async def test_https_to_http_downgrade_is_rejected_when_policy_disallows():
     cm = MockAsyncContext(mock_resp)
 
     with patch("aiohttp.ClientSession.get", return_value=cm):
-        cfg = {"type": "http", "method": "GET", "url": "https://example.com/check", "success_indicators": ["ok"]}
+        cfg = {"type": "http", "side_effect": ValidationSideEffect.READ_ONLY, "method": "GET", "url": "https://example.com/check", "success_indicators": ["ok"]}
         res = await validator.validate_http(cfg, "secret")
         assert res.status == ValidationStatus.ERROR
         assert "redirect" in res.message.lower() or "blocked" in res.message.lower()
@@ -309,7 +310,7 @@ async def test_redirect_loop_is_bounded():
         return MockAsyncContext(mock_resp)
 
     with patch("aiohttp.ClientSession.get", side_effect=mock_get):
-        cfg = {"type": "http", "method": "GET", "url": "https://example.com/loop1", "success_indicators": ["ok"]}
+        cfg = {"type": "http", "side_effect": ValidationSideEffect.READ_ONLY, "method": "GET", "url": "https://example.com/loop1", "success_indicators": ["ok"]}
         res = await validator.validate_http(cfg, "secret")
         assert res.status == ValidationStatus.ERROR
         assert loop_count <= 4
@@ -334,7 +335,7 @@ async def test_keyhacks_uses_policy_aware_dns_resolver():
     with patch("aiohttp.TCPConnector") as mock_conn:
         with patch("aiohttp.ClientSession"):
             with patch.object(client, "request", return_value=(200, '{"valid": true}', "https://example.com/check")):
-                cfg = {"type": "http", "method": "GET", "url": "https://example.com/check", "success_indicators": ["valid"]}
+                cfg = {"type": "http", "side_effect": ValidationSideEffect.READ_ONLY, "method": "GET", "url": "https://example.com/check", "success_indicators": ["valid"]}
                 await validator.validate_http(cfg, "key123")
                 mock_conn.assert_called_once()
                 kwargs = mock_conn.call_args[1]
@@ -351,7 +352,7 @@ async def test_keyhacks_rejects_loopback_resolution():
     validator = KeyHacksValidator(scope_manager=scope, request_policy_manager=rpm, http_client=client)
 
     with patch.object(client, "validate_host_network_safety", return_value=(False, "Prohibited loopback/private IP: 127.0.0.1")):
-        cfg = {"type": "http", "method": "GET", "url": "https://example.com/check", "success_indicators": ["ok"]}
+        cfg = {"type": "http", "side_effect": ValidationSideEffect.READ_ONLY, "method": "GET", "url": "https://example.com/check", "success_indicators": ["ok"]}
         res = await validator.validate_http(cfg, "key123")
         assert res.status == ValidationStatus.ERROR
         assert "blocked" in res.message.lower() or "error" in res.message.lower()
@@ -367,7 +368,7 @@ async def test_keyhacks_rejects_private_ip_resolution():
 
     for private_ip in ["10.0.0.1", "172.16.0.1", "192.168.1.1"]:
         with patch.object(client, "validate_host_network_safety", return_value=(False, f"Prohibited private IP: {private_ip}")):
-            cfg = {"type": "http", "method": "GET", "url": "https://example.com/check", "success_indicators": ["ok"]}
+            cfg = {"type": "http", "side_effect": ValidationSideEffect.READ_ONLY, "method": "GET", "url": "https://example.com/check", "success_indicators": ["ok"]}
             res = await validator.validate_http(cfg, "key123")
             assert res.status == ValidationStatus.ERROR
 
@@ -381,7 +382,7 @@ async def test_keyhacks_rejects_cloud_metadata_resolution():
     validator = KeyHacksValidator(scope_manager=scope, request_policy_manager=rpm, http_client=client)
 
     with patch.object(client, "validate_host_network_safety", return_value=(False, "Prohibited IP 169.254.169.254")):
-        cfg = {"type": "http", "method": "GET", "url": "https://example.com/check", "success_indicators": ["ok"]}
+        cfg = {"type": "http", "side_effect": ValidationSideEffect.READ_ONLY, "method": "GET", "url": "https://example.com/check", "success_indicators": ["ok"]}
         res = await validator.validate_http(cfg, "key123")
         assert res.status == ValidationStatus.ERROR
 
@@ -412,7 +413,7 @@ async def test_keyhacks_dns_failure_fails_closed():
     validator = KeyHacksValidator(scope_manager=scope, request_policy_manager=rpm, http_client=client)
 
     with patch("socket.getaddrinfo", side_effect=socket.gaierror("Name or service not known")):
-        cfg = {"type": "http", "method": "GET", "url": "https://example.com/check", "success_indicators": ["ok"]}
+        cfg = {"type": "http", "side_effect": ValidationSideEffect.READ_ONLY, "method": "GET", "url": "https://example.com/check", "success_indicators": ["ok"]}
         res = await validator.validate_http(cfg, "key123")
         assert res.status == ValidationStatus.ERROR
 
@@ -442,7 +443,7 @@ async def test_keyhacks_uses_shared_concurrency_semaphore():
         return ValidationResult(status=ValidationStatus.VALID, message="OK")
 
     with patch.object(validator, "_do_validate_http", side_effect=spy_do):
-        cfg = {"type": "http", "method": "GET", "url": "https://example.com/check", "success_indicators": ["ok"]}
+        cfg = {"type": "http", "side_effect": ValidationSideEffect.READ_ONLY, "method": "GET", "url": "https://example.com/check", "success_indicators": ["ok"]}
         await validator.validate_http(cfg, "key")
 
     assert acquired_during_execution is True
@@ -468,7 +469,7 @@ async def test_keyhacks_direct_invocation_cannot_bypass_semaphore():
     with patch.object(client, "request", side_effect=spy_request):
         with patch("aiohttp.TCPConnector"):
             with patch("aiohttp.ClientSession"):
-                cfg = {"type": "http", "method": "GET", "url": "https://example.com/check", "success_indicators": ["valid"]}
+                cfg = {"type": "http", "side_effect": ValidationSideEffect.READ_ONLY, "method": "GET", "url": "https://example.com/check", "success_indicators": ["valid"]}
                 await validator.validate_http(cfg, "key")
 
     assert observed_values == [0], "Semaphore must have been acquired during request execution"
@@ -500,7 +501,7 @@ async def test_keyhacks_concurrency_never_exceeds_profile_ceiling():
     with patch.object(client, "request", side_effect=mock_request):
         with patch("aiohttp.TCPConnector"):
             with patch("aiohttp.ClientSession"):
-                cfg = {"type": "http", "method": "GET", "url": "https://example.com/check", "success_indicators": ["valid"]}
+                cfg = {"type": "http", "side_effect": ValidationSideEffect.READ_ONLY, "method": "GET", "url": "https://example.com/check", "success_indicators": ["valid"]}
                 tasks = [validator.validate_http(cfg, f"key_{i}") for i in range(6)]
                 await asyncio.gather(*tasks)
 
@@ -522,7 +523,7 @@ async def test_keyhacks_exception_releases_semaphore():
     with patch.object(client, "request", side_effect=RuntimeError("Socket error")):
         with patch("aiohttp.TCPConnector"):
             with patch("aiohttp.ClientSession"):
-                cfg = {"type": "http", "method": "GET", "url": "https://example.com/check", "success_indicators": ["ok"]}
+                cfg = {"type": "http", "side_effect": ValidationSideEffect.READ_ONLY, "method": "GET", "url": "https://example.com/check", "success_indicators": ["ok"]}
                 res = await validator.validate_http(cfg, "key")
                 assert res.status == ValidationStatus.ERROR
 
@@ -549,7 +550,7 @@ async def test_keyhacks_cancellation_releases_semaphore():
     with patch.object(client, "request", side_effect=mock_hang):
         with patch("aiohttp.TCPConnector"):
             with patch("aiohttp.ClientSession"):
-                cfg = {"type": "http", "method": "GET", "url": "https://example.com/check", "success_indicators": ["ok"]}
+                cfg = {"type": "http", "side_effect": ValidationSideEffect.READ_ONLY, "method": "GET", "url": "https://example.com/check", "success_indicators": ["ok"]}
                 task = asyncio.create_task(validator.validate_http(cfg, "key"))
                 await started.wait()
                 task.cancel()
@@ -582,7 +583,7 @@ async def test_keyhacks_uses_shared_global_rate_limiter():
 
     with patch.object(rpm.global_limiter, "acquire", AsyncMock()) as mock_acquire:
         with patch("aiohttp.ClientSession.get", return_value=cm):
-            cfg = {"type": "http", "method": "GET", "url": "https://example.com/check", "success_indicators": ["valid"]}
+            cfg = {"type": "http", "side_effect": ValidationSideEffect.READ_ONLY, "method": "GET", "url": "https://example.com/check", "success_indicators": ["valid"]}
             await validator.validate_http(cfg, "key")
             assert mock_acquire.call_count >= 1
 
@@ -604,7 +605,7 @@ async def test_keyhacks_uses_shared_per_host_rate_limiter():
 
     with patch.object(rpm, "acquire", AsyncMock()) as mock_acquire:
         with patch("aiohttp.ClientSession.get", return_value=cm):
-            cfg = {"type": "http", "method": "GET", "url": "https://example.com/check", "success_indicators": ["valid"]}
+            cfg = {"type": "http", "side_effect": ValidationSideEffect.READ_ONLY, "method": "GET", "url": "https://example.com/check", "success_indicators": ["valid"]}
             await validator.validate_http(cfg, "key")
             mock_acquire.assert_called_with(host="example.com")
 
@@ -643,7 +644,7 @@ async def test_keyhacks_retries_obey_rate_limits():
     validator = KeyHacksValidator(scope_manager=scope, request_policy_manager=rpm, http_client=client)
 
     with patch("aiohttp.ClientSession.get", side_effect=mock_get):
-        cfg = {"type": "http", "method": "GET", "url": "https://example.com/check", "success_indicators": ["valid"]}
+        cfg = {"type": "http", "side_effect": ValidationSideEffect.READ_ONLY, "method": "GET", "url": "https://example.com/check", "success_indicators": ["valid"]}
         res = await validator.validate_http(cfg, "key")
         assert res.status == ValidationStatus.VALID
         assert acquire_count == 3
@@ -686,7 +687,7 @@ async def test_keyhacks_redirects_obey_rate_limits():
     validator = KeyHacksValidator(scope_manager=scope, request_policy_manager=rpm, http_client=client)
 
     with patch("aiohttp.ClientSession.get", side_effect=mock_get):
-        cfg = {"type": "http", "method": "GET", "url": "https://example.com/check", "success_indicators": ["valid"]}
+        cfg = {"type": "http", "side_effect": ValidationSideEffect.READ_ONLY, "method": "GET", "url": "https://example.com/check", "success_indicators": ["valid"]}
         res = await validator.validate_http(cfg, "key")
         assert res.status == ValidationStatus.VALID
         assert acquire_count == 2
@@ -718,7 +719,7 @@ async def test_keyhacks_preserves_required_program_headers():
         return MockAsyncContext(resp=mock_resp)
 
     with patch("aiohttp.ClientSession.get", side_effect=mock_get):
-        cfg = {"type": "http", "method": "GET", "url": "https://example.com/check", "success_indicators": ["valid"]}
+        cfg = {"type": "http", "side_effect": ValidationSideEffect.READ_ONLY, "method": "GET", "url": "https://example.com/check", "success_indicators": ["valid"]}
         await validator.validate_http(cfg, "key")
 
     assert sent_headers.get("X-Bug-Bounty-Researcher") == "researcher_123"
@@ -754,7 +755,7 @@ async def test_keyhacks_does_not_leak_auth_across_origins():
 
     with patch("aiohttp.ClientSession.get", side_effect=mock_get):
         cfg = {
-            "type": "http",
+            "type": "http", "side_effect": ValidationSideEffect.READ_ONLY,
             "method": "GET",
             "url": "https://example.com/check",
             "headers": {"Authorization": "Bearer secret_api_token"},
@@ -790,7 +791,7 @@ async def test_keyhacks_mandatory_headers_cannot_be_overridden():
 
     with patch("aiohttp.ClientSession.get", side_effect=mock_get):
         cfg = {
-            "type": "http",
+            "type": "http", "side_effect": ValidationSideEffect.READ_ONLY,
             "method": "GET",
             "url": "https://example.com/check",
             "headers": {"X-Researcher": "spoofed_val"},
@@ -821,7 +822,7 @@ async def test_keyhacks_does_not_log_credentials(caplog):
 
     with patch("aiohttp.ClientSession.get", return_value=cm):
         cfg = {
-            "type": "http",
+            "type": "http", "side_effect": ValidationSideEffect.READ_ONLY,
             "method": "GET",
             "url": "https://example.com/check",
             "headers": {"Authorization": "Bearer {key}"},

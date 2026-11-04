@@ -33,6 +33,7 @@ from src.core.program_profile import ProgramProfile, PolicyParser, strict_bool, 
 from src.core.program_manager import ProgramManager
 from src.core.scope import ScopeManager
 from src.core.effective_policy import EffectivePolicy
+from src.validators.keyhacks import ValidationSideEffect
 from src.core.request_config import NightCrawlerConfig, load_config
 from src.core.request_policy import RequestPolicyManager
 from src.core.tool_compatibility import ToolCompatibilityManager
@@ -837,6 +838,7 @@ async def test_keyhacks_validator_enforces_shared_semaphore_and_scope():
         "type": "http",
         "method": "GET",
         "url": "https://unauthorized.evil.com/check?key={key}",
+        "side_effect": ValidationSideEffect.READ_ONLY,
         "success_indicators": ["ok"]
     }
     res_blocked = await validator.validate_http(fake_cfg, "test_secret_123")
@@ -848,6 +850,7 @@ async def test_keyhacks_validator_enforces_shared_semaphore_and_scope():
         "type": "http",
         "method": "GET",
         "url": "https://example.com/check?key={key}",
+        "side_effect": ValidationSideEffect.READ_ONLY,
         "success_indicators": ["valid"]
     }
 

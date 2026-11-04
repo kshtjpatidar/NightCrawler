@@ -79,7 +79,8 @@ async def test_invalid_tls_certificate_rejected():
             "type": "http",
             "method": "GET",
             "url": "https://example.com/api?key={key}",
-            "success_indicators": ["valid"]
+            "success_indicators": ["valid"],
+            "side_effect": ValidationSideEffect.READ_ONLY
         }
         res = await validator.validate_http(cfg, "SYNTHETIC_TEST_TOKEN_12345")
         assert res.status == ValidationStatus.ERROR
@@ -192,7 +193,13 @@ async def test_exception_message_redaction():
     leaky_err = RuntimeError(f"Connection failed for {secret_str} at https://example.com/api?token={secret_str}")
 
     with patch.object(client, "request", side_effect=leaky_err):
-        cfg = {"type": "http", "method": "GET", "url": "https://example.com/api?token={key}", "success_indicators": ["valid"]}
+        cfg = {
+            "type": "http",
+            "method": "GET",
+            "url": "https://example.com/api?token={key}",
+            "success_indicators": ["valid"],
+            "side_effect": ValidationSideEffect.READ_ONLY
+        }
         res = await validator.validate_http(cfg, secret_str)
 
         assert res.status == ValidationStatus.ERROR
@@ -313,7 +320,7 @@ async def test_side_effecting_validators_disabled_by_default():
 @pytest.mark.asyncio
 async def test_explicit_authorization_required_for_state_changing_validation():
     """Verify state-changing validators execute only when explicitly authorized."""
-    policy = EffectivePolicy.build()
+    policy = EffectivePolicy.build(cli_overrides={"allow_state_changing": True, "authorized_providers": ["firebase"]})
     # Explicitly authorize state changing validation and provider
     validator = KeyHacksValidator.from_policy(
         policy,

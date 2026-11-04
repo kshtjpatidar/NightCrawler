@@ -1122,7 +1122,9 @@ class KeyHacksValidator:
             policy_providers = getattr(effective_policy, "authorized_providers", None)
             self.authorized_providers = set(authorized_providers) if authorized_providers is not None else (set(policy_providers) if policy_providers else set())
             policy_state_changing = getattr(effective_policy, "allow_state_changing", False)
-            self.allow_state_changing = allow_state_changing or policy_state_changing
+            if allow_state_changing and not policy_state_changing:
+                raise ValueError("EffectivePolicy prohibits state-changing operations.")
+            self.allow_state_changing = policy_state_changing and allow_state_changing if allow_state_changing else policy_state_changing
         else:
             self.effective_policy = None
             self.scope_manager = scope_manager
@@ -1154,6 +1156,10 @@ class KeyHacksValidator:
         policy_tls = getattr(effective_policy, "verify_tls", None)
         verify_ssl = policy_tls if policy_tls is not None else True
         policy_state_changing = getattr(effective_policy, "allow_state_changing", False)
+        if allow_state_changing and not policy_state_changing:
+            raise ValueError("EffectivePolicy prohibits state-changing operations.")
+        effective_state_changing = policy_state_changing and allow_state_changing if allow_state_changing else policy_state_changing
+
         policy_providers = getattr(effective_policy, "authorized_providers", None)
         providers = set(authorized_providers) if authorized_providers is not None else (set(policy_providers) if policy_providers else set())
         
@@ -1170,7 +1176,7 @@ class KeyHacksValidator:
             scope_manager=getattr(effective_policy, "scope_manager", None),
             timeout=timeout,
             verify_ssl=verify_ssl,
-            allow_state_changing=allow_state_changing or policy_state_changing,
+            allow_state_changing=effective_state_changing,
             authorized_providers=providers
         )
 
@@ -1312,9 +1318,7 @@ class KeyHacksValidator:
         """Verify if external third-party provider is explicitly authorized."""
         if not self.authorized_providers:
             return False
-        if "*" in self.authorized_providers or "all" in self.authorized_providers:
-            return True
-        provider = (validator.get("provider") or self.extract_provider_from_url(url)).lower()
+        provider = (validator.get("provider") or self.extract_provider_from_url(url) or "").lower()
         if self.http_client is not None and hasattr(self.http_client, "is_provider_authorized"):
             return self.http_client.is_provider_authorized(provider, url)
         from src.core.http_client import NightCrawlerHttpClient
@@ -1399,12 +1403,7 @@ class KeyHacksValidator:
             sanitized_cmd = self.build_sanitized_command(validator, secret, extra_params, url, method)
 
             # Check side effects before touching network or dependency validation
-            side_effect = validator.get("side_effect")
-            if side_effect is None:
-                if method in ("GET", "HEAD"):
-                    side_effect = ValidationSideEffect.READ_ONLY
-                else:
-                    side_effect = ValidationSideEffect.UNKNOWN
+            side_effect = validator.get("side_effect", ValidationSideEffect.UNKNOWN)
             side_effect_str = side_effect.value if isinstance(side_effect, ValidationSideEffect) else str(side_effect).lower()
             if side_effect_str == "unknown":
                 return ValidationResult(

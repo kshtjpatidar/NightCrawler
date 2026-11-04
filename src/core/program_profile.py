@@ -60,6 +60,62 @@ def strict_positive_int(val: Any, field_name: str = "integer") -> int:
     return i
 
 
+def parse_authorized_providers(val: Any, context: str = "program profile") -> List[str]:
+    """
+    Strictly parse and validate authorized providers list.
+    Fails closed on wrong types, numbers, nested lists, wildcards, empty strings, and malformed names.
+    Returns sorted, normalized, deduplicated list of provider identifiers or domain names.
+    """
+    if val is None:
+        return []
+    if isinstance(val, str):
+        raise ValueError(f"authorized_providers in {context} must be a list of strings, got str: '{val}'")
+    if not isinstance(val, (list, tuple, set)):
+        raise ValueError(f"authorized_providers in {context} must be a list of strings, got {type(val).__name__}")
+
+    cleaned = []
+    seen = set()
+    for item in val:
+        if not isinstance(item, str):
+            raise ValueError(f"authorized_providers entries in {context} must be strings, got {type(item).__name__}: {item}")
+        p_clean = item.strip()
+        if not p_clean:
+            raise ValueError(f"authorized_providers entries in {context} cannot be empty strings.")
+        if p_clean in ("*", "all"):
+            raise ValueError(f"Wildcard '{p_clean}' is prohibited in authorized_providers in {context}.")
+
+        # IDNA normalization first (converts Unicode domain names to ASCII punycode)
+        try:
+            normalized = p_clean.lower().encode("idna").decode("ascii")
+        except Exception:
+            raise ValueError(f"Invalid Unicode/IDNA provider name in {context}: '{p_clean}'")
+
+        # Reject invalid characters (injection, control chars, spaces, slashes)
+        if not re.match(r'^[a-zA-Z0-9_\-\.]+$', normalized):
+            raise ValueError(
+                f"Invalid provider entry in {context}: '{p_clean}'. "
+                f"Provider names must be valid alphanumeric identifiers or domain names."
+            )
+
+        # Disallow IP literals
+        try:
+            ipaddress.ip_address(normalized)
+            raise ValueError(f"IP address literals like '{p_clean}' are prohibited in authorized_providers in {context}.")
+        except ValueError as e:
+            if "prohibited" in str(e):
+                raise
+
+        # Disallow single TLDs like 'com', '.com'
+        if normalized.startswith(".") or (normalized in ("com", "org", "net", "io", "gov", "edu", "co", "app", "dev")):
+            raise ValueError(f"Top-level domain '{p_clean}' is prohibited as an authorized provider in {context}.")
+
+        if normalized not in seen:
+            seen.add(normalized)
+            cleaned.append(normalized)
+
+    return sorted(cleaned)
+
+
 @dataclass
 class ScopeDefinition:
     enabled: bool = True
@@ -263,6 +319,20 @@ class PolicyParser:
     @classmethod
     def from_dict(cls, data: Dict[str, Any], source_ref: str = "") -> ProgramProfile:
         """Instantiate ProgramProfile from dictionary."""
+        if not isinstance(data, dict):
+            raise ValueError(f"Program profile data must be a dictionary, got {type(data).__name__}")
+
+        # Validate against unknown top-level keys
+        allowed_top_keys = {
+            "id", "name", "version", "platform", "policy_url", "description",
+            "source_reference", "requires_review", "review_notes", "scope",
+            "request_policy", "headers", "authentication", "testing_permissions",
+            "tool_restrictions", "reporting", "authorized_providers"
+        }
+        unknown_top = set(data.keys()) - allowed_top_keys
+        if unknown_top:
+            raise ValueError(f"Unknown policy key(s) in program profile: {sorted(unknown_top)}. Unrecognized configuration keys are prohibited.")
+
         p_id = data.get("id", "custom-program").lower().strip()
         p_name = data.get("name", p_id)
         version = str(data.get("version", "1.0.0"))
@@ -271,6 +341,17 @@ class PolicyParser:
         description = data.get("description", "")
 
         scope_raw = data.get("scope", {})
+        if not isinstance(scope_raw, dict):
+            raise ValueError(f"scope section must be a dictionary in profile '{p_id}'")
+        allowed_scope_keys = {
+            "enabled", "allowed_domains", "excluded_domains", "allowed_ips", "allowed_cidrs",
+            "excluded_ips", "excluded_cidrs", "allowed_paths", "excluded_paths",
+            "allowed_protocols", "allowed_ports", "third_party_hosted_exclusions"
+        }
+        unknown_scope = set(scope_raw.keys()) - allowed_scope_keys
+        if unknown_scope:
+            raise ValueError(f"Unknown key(s) in profile scope configuration: {sorted(unknown_scope)}.")
+
         scope = ScopeDefinition(
             enabled=strict_bool(scope_raw.get("enabled", True), "scope.enabled") if "enabled" in scope_raw else True,
             allowed_domains=[d.strip() for d in scope_raw.get("allowed_domains", []) if d.strip()],
@@ -287,6 +368,16 @@ class PolicyParser:
         )
 
         rp_raw = data.get("request_policy", {})
+        if not isinstance(rp_raw, dict):
+            raise ValueError(f"request_policy section must be a dictionary in profile '{p_id}'")
+        allowed_rp_keys = {
+            "max_rps", "concurrency", "timeout", "max_retries", "crawl_depth", "burst",
+            "verify_tls", "strict_scope", "per_host_rps"
+        }
+        unknown_rp = set(rp_raw.keys()) - allowed_rp_keys
+        if unknown_rp:
+            raise ValueError(f"Unknown key(s) in profile request_policy: {sorted(unknown_rp)}.")
+
         max_rps_val = rp_raw.get("max_rps", 5.0)
         try:
             max_rps = float(max_rps_val)
@@ -332,6 +423,16 @@ class PolicyParser:
         headers = data.get("headers", {"required": {}, "optional": {}})
 
         auth_raw = data.get("authentication", {})
+        if not isinstance(auth_raw, dict):
+            raise ValueError(f"authentication section must be a dictionary in profile '{p_id}'")
+        allowed_auth_keys = {
+            "type", "token_env", "header_name", "header_prefix", "cookie_env",
+            "username_env", "password_env", "session_file"
+        }
+        unknown_auth = set(auth_raw.keys()) - allowed_auth_keys
+        if unknown_auth:
+            raise ValueError(f"Unknown key(s) in profile authentication: {sorted(unknown_auth)}.")
+
         authentication = AuthenticationDefinition(
             type=auth_raw.get("type", "none").lower().strip(),
             token_env=auth_raw.get("token_env"),
@@ -344,6 +445,18 @@ class PolicyParser:
         )
 
         tp_raw = data.get("testing_permissions", {})
+        if not isinstance(tp_raw, dict):
+            raise ValueError(f"testing_permissions section must be a dictionary in profile '{p_id}'")
+        allowed_tp_keys = {
+            "passive_recon", "active_recon", "endpoint_discovery", "javascript_analysis",
+            "secret_detection", "credential_validation", "fuzzing", "injection_testing",
+            "destructive_testing", "denial_of_service", "social_engineering", "state_changing_allowed",
+            "allowed_payload_types", "restricted_file_paths"
+        }
+        unknown_tp = set(tp_raw.keys()) - allowed_tp_keys
+        if unknown_tp:
+            raise ValueError(f"Unknown key(s) in profile testing_permissions: {sorted(unknown_tp)}.")
+
         testing_permissions = TestingPermissionsDefinition(
             passive_recon=strict_bool(tp_raw.get("passive_recon", True), "testing_permissions.passive_recon") if "passive_recon" in tp_raw else True,
             active_recon=strict_bool(tp_raw.get("active_recon", False), "testing_permissions.active_recon") if "active_recon" in tp_raw else False,
@@ -360,20 +473,34 @@ class PolicyParser:
         )
 
         tr_raw = data.get("tool_restrictions", {})
+        if not isinstance(tr_raw, dict):
+            raise ValueError(f"tool_restrictions section must be a dictionary in profile '{p_id}'")
+        allowed_tr_keys = {"allowed_tools", "disabled_tools"}
+        unknown_tr = set(tr_raw.keys()) - allowed_tr_keys
+        if unknown_tr:
+            raise ValueError(f"Unknown key(s) in profile tool_restrictions: {sorted(unknown_tr)}.")
+
         tool_restrictions = ToolRestrictionsDefinition(
             allowed_tools=[t.lower().strip() for t in tr_raw.get("allowed_tools", ["subfinder", "httpx", "gau", "waybackurls", "jsluice"])],
             disabled_tools=[t.lower().strip() for t in tr_raw.get("disabled_tools", ["katana", "hakrawler", "subjs", "getjs"])]
         )
 
         rep_raw = data.get("reporting", {})
+        if not isinstance(rep_raw, dict):
+            raise ValueError(f"reporting section must be a dictionary in profile '{p_id}'")
+        allowed_rep_keys = {"default_template", "default_format", "program_name"}
+        unknown_rep = set(rep_raw.keys()) - allowed_rep_keys
+        if unknown_rep:
+            raise ValueError(f"Unknown key(s) in profile reporting: {sorted(unknown_rep)}.")
+
         reporting = ReportingDefinition(
             default_template=rep_raw.get("default_template", "bugcrowd"),
             default_format=rep_raw.get("default_format", "html"),
             program_name=rep_raw.get("program_name", p_name)
         )
 
-        auth_providers_raw = data.get("authorized_providers", [])
-        authorized_providers = [str(p).strip().lower() for p in auth_providers_raw if str(p).strip()]
+        auth_providers_raw = data.get("authorized_providers")
+        authorized_providers = parse_authorized_providers(auth_providers_raw, context=f"profile '{p_id}'")
 
         requires_review = strict_bool(data.get("requires_review", False), "requires_review") if "requires_review" in data else False
         review_notes = list(data.get("review_notes", []))
@@ -566,5 +693,12 @@ class PolicyValidator:
         if profile.requires_review:
             # Informational note, not fatal error, but prevents active recon until cleared
             pass
+
+        # 7. Authorized Providers Validation
+        if profile.authorized_providers:
+            try:
+                parse_authorized_providers(profile.authorized_providers, context=f"profile '{profile.id}'")
+            except ValueError as e:
+                errors.append(str(e))
 
         return errors
