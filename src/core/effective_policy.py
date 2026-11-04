@@ -74,18 +74,25 @@ class EffectivePolicy:
                 raise AttributeError("Cannot reassign or mutate authorized_providers on EffectivePolicy; permissions are immutable.")
             if value is None:
                 val = frozenset()
-            elif isinstance(value, (set, frozenset, list, tuple)):
-                from src.core.program_profile import parse_authorized_providers
-                try:
-                    val = frozenset(parse_authorized_providers(value, context="EffectivePolicy"))
-                except Exception:
-                    val = frozenset(value)
             else:
-                val = frozenset()
+                from src.core.program_profile import parse_authorized_providers
+                val = frozenset(parse_authorized_providers(value, context="EffectivePolicy"))
             super().__setattr__("authorized_providers", val)
             super().__setattr__("_authorized_providers_locked", True)
             return
         super().__setattr__(name, value)
+
+    def __post_init__(self):
+        if self.max_rps <= 0:
+            raise ValueError(f"max_rps must be positive, got {self.max_rps}")
+        if self.concurrency <= 0:
+            raise ValueError(f"concurrency must be a positive integer, got {self.concurrency}")
+        if self.timeout <= 0:
+            raise ValueError(f"timeout must be a positive integer, got {self.timeout}")
+        if self.crawl_depth <= 0:
+            raise ValueError(f"crawl_depth must be a positive integer, got {self.crawl_depth}")
+        if self.strict_scope and not self.verify_tls:
+            raise ValueError("Insecure TLS configuration is prohibited in strict compliance mode.")
 
     @classmethod
     def build(
