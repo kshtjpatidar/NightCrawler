@@ -105,3 +105,91 @@ async def test_rate_limiter_accounts_for_retries():
     assert status == 200
     # Both the failed attempt and the retry attempt must be counted
     assert limiter.total_requests == 2
+
+
+# ============================================================================
+# DIRECT CONSTRUCTOR VALIDATION TESTS (FINDING 2)
+# ============================================================================
+
+@pytest.mark.parametrize("invalid_rate", [
+    float("nan"),
+    float("inf"),
+    float("-inf"),
+    0,
+    0.0,
+    -1,
+    -10.5,
+    1_000_001,
+    10_000_000,
+    10**100
+])
+def test_global_rate_limiter_rejects_invalid_numeric_rates(invalid_rate):
+    """Verify GlobalRateLimiter direct construction rejects NaN, +/- inf, zero, negatives, and excessive values."""
+    with pytest.raises(ValueError):
+        GlobalRateLimiter(max_requests_per_second=invalid_rate)
+
+
+@pytest.mark.parametrize("invalid_type_rate", [
+    True,
+    False,
+    "5.0",
+    "10",
+    "invalid",
+    None,
+    [],
+    {}
+])
+def test_global_rate_limiter_rejects_non_numeric_types(invalid_type_rate):
+    """Verify GlobalRateLimiter direct construction rejects booleans, strings, and non-numeric types."""
+    with pytest.raises(TypeError):
+        GlobalRateLimiter(max_requests_per_second=invalid_type_rate)
+
+
+@pytest.mark.parametrize("valid_rate,expected", [
+    (1, 1.0),
+    (5.0, 5.0),
+    (10, 10.0),
+    (0.5, 0.5),
+    (1_000_000, 1_000_000.0)
+])
+def test_global_rate_limiter_accepts_valid_rates(valid_rate, expected):
+    """Verify GlobalRateLimiter correctly accepts and assigns valid rates."""
+    limiter = GlobalRateLimiter(max_requests_per_second=valid_rate)
+    assert limiter.rate == expected
+    assert limiter.max_tokens == 1.0
+
+
+@pytest.mark.parametrize("invalid_burst", [
+    0,
+    -1,
+    -10,
+    1_000_001,
+    10_000_000
+])
+def test_global_rate_limiter_rejects_out_of_bounds_burst(invalid_burst):
+    """Verify GlobalRateLimiter direct construction rejects non-positive or excessive burst values."""
+    with pytest.raises(ValueError):
+        GlobalRateLimiter(max_requests_per_second=5.0, burst=invalid_burst)
+
+
+@pytest.mark.parametrize("invalid_burst_type", [
+    True,
+    False,
+    1.5,
+    "5",
+    "burst",
+    [],
+    {}
+])
+def test_global_rate_limiter_rejects_invalid_burst_types(invalid_burst_type):
+    """Verify GlobalRateLimiter direct construction rejects booleans, floats, and strings for burst."""
+    with pytest.raises(TypeError):
+        GlobalRateLimiter(max_requests_per_second=5.0, burst=invalid_burst_type)
+
+
+def test_global_rate_limiter_accepts_valid_burst():
+    """Verify GlobalRateLimiter accepts valid burst integers."""
+    limiter = GlobalRateLimiter(max_requests_per_second=5.0, burst=5)
+    assert limiter.rate == 5.0
+    assert limiter.max_tokens == 5.0
+    assert limiter.tokens == 5.0

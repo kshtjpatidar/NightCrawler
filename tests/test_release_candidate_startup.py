@@ -957,3 +957,218 @@ def test_default_profile_genuinely_absent_fallback_independently_validated(tmp_p
         assert mock_conn.call_count == 0
         assert mock_popen.call_count == 0
 
+
+# ============================================================================
+# SECTION 7: FILESYSTEM DISCOVERY ERROR PROPAGATION (FINDING 1)
+# ============================================================================
+
+def test_filesystem_discovery_missing_programs_directory(tmp_path):
+    """
+    Verify that a demonstrably missing programs directory:
+    1. Returns None from find_profile_path and get_profile.
+    2. Returns False from profile_exists.
+    3. Allows clean fallback to base configuration.
+    """
+    missing_dir = tmp_path / "missing_programs_dir"
+    assert not missing_dir.exists()
+
+    pm = ProgramManager(base_dir=missing_dir)
+    assert pm.find_profile_path("uxcam") is None
+    assert pm.profile_exists("uxcam") is False
+    assert pm.get_profile("uxcam") is None
+
+    runner = CliRunner()
+    with patch("main.ProgramManager", lambda base_dir=None: pm), \
+         patch("src.core.scanner.NightCrawlerScanner.__init__", return_value=None) as mock_scanner, \
+         patch("asyncio.run", return_value=None):
+
+        result = runner.invoke(main, ["-t", "uxcam.com", "--no-prompt", "--header-value", "researcher@example.com"])
+        assert "failed to load default program profile" not in result.output.lower()
+        assert mock_scanner.call_count == 1
+
+
+def test_filesystem_discovery_existing_unreadable_programs_directory(tmp_path):
+    """
+    Verify that an existing but unreadable programs directory:
+    1. Does NOT convert PermissionError to absence.
+    2. Propagates PermissionError from find_profile_path, profile_exists, and get_profile.
+    3. Fails closed with non-zero exit in main.py before any transport or scanner.
+    """
+    unreadable_dir = tmp_path / "unreadable_programs"
+    unreadable_dir.mkdir(parents=True)
+    os.chmod(unreadable_dir, 0o000)
+
+    try:
+        pm = ProgramManager(base_dir=unreadable_dir)
+
+        with pytest.raises(PermissionError):
+            pm.find_profile_path("uxcam")
+
+        with pytest.raises(PermissionError):
+            pm.profile_exists("uxcam")
+
+        with pytest.raises(PermissionError):
+            pm.get_profile("uxcam")
+
+        runner = CliRunner()
+        with patch("main.ProgramManager", lambda base_dir=None: pm), \
+             patch("src.core.scanner.NightCrawlerScanner.__init__") as mock_scanner, \
+             patch("aiohttp.ClientSession.__init__") as mock_session, \
+             patch("aiohttp.TCPConnector.__init__") as mock_conn, \
+             patch("subprocess.Popen") as mock_popen:
+
+            result = runner.invoke(main, ["-t", "uxcam.com", "--no-prompt"])
+
+            assert result.exit_code != 0
+            assert "failed to load default program profile" in result.output.lower()
+            assert "permission denied" in result.output.lower()
+            assert mock_scanner.call_count == 0
+            assert mock_session.call_count == 0
+            assert mock_conn.call_count == 0
+            assert mock_popen.call_count == 0
+    finally:
+        os.chmod(unreadable_dir, 0o755)
+
+
+def test_filesystem_discovery_permission_failure_during_iteration(tmp_path):
+    """
+    Verify that PermissionError during directory iteration:
+    1. Propagates out of find_profile_path, profile_exists, and get_profile.
+    2. Fails closed with non-zero exit in main.py before any transport or scanner.
+    """
+    programs_dir = tmp_path / "programs"
+    programs_dir.mkdir(parents=True)
+    pm = ProgramManager(base_dir=programs_dir)
+
+    with patch.object(Path, "iterdir", side_effect=PermissionError("Iteration permission denied")):
+        with pytest.raises(PermissionError):
+            pm.find_profile_path("uxcam")
+
+        with pytest.raises(PermissionError):
+            pm.profile_exists("uxcam")
+
+        with pytest.raises(PermissionError):
+            pm.get_profile("uxcam")
+
+        runner = CliRunner()
+        with patch("main.ProgramManager", lambda base_dir=None: pm), \
+             patch("src.core.scanner.NightCrawlerScanner.__init__") as mock_scanner, \
+             patch("aiohttp.ClientSession.__init__") as mock_session, \
+             patch("aiohttp.TCPConnector.__init__") as mock_conn, \
+             patch("subprocess.Popen") as mock_popen:
+
+            result = runner.invoke(main, ["-t", "uxcam.com", "--no-prompt"])
+
+            assert result.exit_code != 0
+            assert "failed to load default program profile" in result.output.lower()
+            assert mock_scanner.call_count == 0
+            assert mock_session.call_count == 0
+            assert mock_conn.call_count == 0
+            assert mock_popen.call_count == 0
+
+
+def test_filesystem_discovery_io_error_during_iteration(tmp_path):
+    """
+    Verify that unexpected filesystem OSError (e.g. disk I/O error):
+    1. Propagates out of find_profile_path, profile_exists, and get_profile.
+    2. Fails closed with non-zero exit in main.py before any transport or scanner.
+    """
+    programs_dir = tmp_path / "programs"
+    programs_dir.mkdir(parents=True)
+    pm = ProgramManager(base_dir=programs_dir)
+
+    with patch.object(Path, "iterdir", side_effect=OSError(5, "Input/output error")):
+        with pytest.raises(OSError) as exc_info:
+            pm.find_profile_path("uxcam")
+        assert exc_info.value.errno == 5
+
+        with pytest.raises(OSError):
+            pm.profile_exists("uxcam")
+
+        with pytest.raises(OSError):
+            pm.get_profile("uxcam")
+
+        runner = CliRunner()
+        with patch("main.ProgramManager", lambda base_dir=None: pm), \
+             patch("src.core.scanner.NightCrawlerScanner.__init__") as mock_scanner, \
+             patch("aiohttp.ClientSession.__init__") as mock_session, \
+             patch("aiohttp.TCPConnector.__init__") as mock_conn, \
+             patch("subprocess.Popen") as mock_popen:
+
+            result = runner.invoke(main, ["-t", "uxcam.com", "--no-prompt"])
+
+            assert result.exit_code != 0
+            assert "failed to load default program profile" in result.output.lower()
+            assert mock_scanner.call_count == 0
+            assert mock_session.call_count == 0
+            assert mock_conn.call_count == 0
+            assert mock_popen.call_count == 0
+
+
+def test_filesystem_discovery_genuinely_absent_uxcam_profile(tmp_path):
+    """
+    Verify that when programs/ exists and is readable, but uxcam is genuinely absent:
+    1. find_profile_path returns None.
+    2. profile_exists returns False.
+    3. get_profile returns None.
+    4. main falls back to base config without error.
+    """
+    programs_dir = tmp_path / "programs"
+    programs_dir.mkdir(parents=True)
+    other_dir = programs_dir / "other-program"
+    other_dir.mkdir()
+    (other_dir / "program.yaml").write_text("id: other-program\nname: Other\n")
+
+    pm = ProgramManager(base_dir=programs_dir)
+    assert pm.find_profile_path("uxcam") is None
+    assert pm.profile_exists("uxcam") is False
+    assert pm.get_profile("uxcam") is None
+
+    runner = CliRunner()
+    with patch("main.ProgramManager", lambda base_dir=None: pm), \
+         patch("src.core.scanner.NightCrawlerScanner.__init__", return_value=None) as mock_scanner, \
+         patch("asyncio.run", return_value=None):
+
+        result = runner.invoke(main, ["-t", "uxcam.com", "--no-prompt", "--header-value", "researcher@example.com"])
+        assert "failed to load default program profile" not in result.output.lower()
+        assert mock_scanner.call_count == 1
+
+
+def test_filesystem_discovery_existing_invalid_uxcam_entry(tmp_path):
+    """
+    Verify that an existing but invalid uxcam profile entry:
+    1. find_profile_path returns the path to the directory.
+    2. profile_exists returns True.
+    3. get_profile raises PolicyValidationError / ValueError.
+    4. main fails closed with non-zero exit before any network initialization.
+    """
+    programs_dir = tmp_path / "programs"
+    uxcam_dir = programs_dir / "uxcam"
+    uxcam_dir.mkdir(parents=True)
+    (uxcam_dir / "program.yaml").write_text("id: uxcam\nname: Broken\nrequest_policy:\n  max_rps: -10\n")
+
+    pm = ProgramManager(base_dir=programs_dir)
+    found_path = pm.find_profile_path("uxcam")
+    assert found_path is not None
+    assert found_path.name.lower() == "uxcam"
+    assert pm.profile_exists("uxcam") is True
+
+    with pytest.raises((PolicyValidationError, ValueError)):
+        pm.get_profile("uxcam")
+
+    runner = CliRunner()
+    with patch("main.ProgramManager", lambda base_dir=None: pm), \
+         patch("src.core.scanner.NightCrawlerScanner.__init__") as mock_scanner, \
+         patch("aiohttp.ClientSession.__init__") as mock_session, \
+         patch("aiohttp.TCPConnector.__init__") as mock_conn, \
+         patch("subprocess.Popen") as mock_popen:
+
+        result = runner.invoke(main, ["-t", "uxcam.com", "--no-prompt"])
+
+        assert result.exit_code != 0
+        assert "failed to load default program profile" in result.output.lower() or "failed validation" in result.output.lower()
+        assert mock_scanner.call_count == 0
+        assert mock_session.call_count == 0
+        assert mock_conn.call_count == 0
+        assert mock_popen.call_count == 0
+

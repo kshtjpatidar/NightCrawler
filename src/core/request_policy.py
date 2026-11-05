@@ -51,18 +51,32 @@ class RequestPolicyManager:
 
         # Determine strictest rate limit
         effective_rps = self.policy.max_rps
-        if global_override_rps is not None and global_override_rps > 0:
+        if global_override_rps is not None:
+            if isinstance(global_override_rps, bool) or not isinstance(global_override_rps, (int, float)):
+                raise TypeError(f"global_override_rps must be numeric, got {type(global_override_rps).__name__}: {global_override_rps}")
+            if not math.isfinite(global_override_rps) or global_override_rps <= 0 or global_override_rps > 1_000_000:
+                raise ValueError(f"Invalid global_override_rps: {global_override_rps}. Must be finite, positive and <= 1,000,000.")
             effective_rps = min(effective_rps, global_override_rps)
 
         # Validate rate limit strictly
-        if math.isnan(effective_rps) or math.isinf(effective_rps) or effective_rps <= 0:
-            raise ValueError(f"Invalid request rate limit: {effective_rps}. Must be positive number.")
+        if isinstance(effective_rps, bool) or not isinstance(effective_rps, (int, float)) or not math.isfinite(effective_rps) or effective_rps <= 0 or effective_rps > 1_000_000:
+            raise ValueError(f"Invalid request rate limit: {effective_rps}. Must be finite, positive and <= 1,000,000.")
 
-        self.effective_rps = effective_rps
+        self.effective_rps = float(effective_rps)
         self.burst = self.policy.burst
-        self.concurrency_limit = max(1, self.policy.concurrency)
+        if isinstance(self.burst, bool) or not isinstance(self.burst, int) or self.burst < 1 or self.burst > 1_000_000:
+            raise ValueError(f"burst must be an integer between 1 and 1,000,000, got {self.burst}")
+
+        if isinstance(self.policy.concurrency, bool) or not isinstance(self.policy.concurrency, int) or self.policy.concurrency < 1 or self.policy.concurrency > 1_000_000:
+            raise ValueError(f"concurrency must be an integer between 1 and 1,000,000, got {self.policy.concurrency}")
+        self.concurrency_limit = self.policy.concurrency
+
+        if isinstance(self.policy.timeout, bool) or not isinstance(self.policy.timeout, int) or self.policy.timeout < 1 or self.policy.timeout > 1_000_000:
+            raise ValueError(f"timeout must be an integer between 1 and 1,000,000, got {self.policy.timeout}")
         self.timeout = self.policy.timeout
-        self.max_retries = self.policy.max_retries
+
+        if isinstance(self.policy.crawl_depth, bool) or not isinstance(self.policy.crawl_depth, int) or self.policy.crawl_depth < 1 or self.policy.crawl_depth > 1_000_000:
+            raise ValueError(f"crawl_depth must be an integer between 1 and 1,000,000, got {self.policy.crawl_depth}")
         self.crawl_depth = self.policy.crawl_depth
         self.verify_tls = self.policy.verify_tls
         self.strict_scope = self.policy.strict_scope

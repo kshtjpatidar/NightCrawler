@@ -4,6 +4,7 @@ Thread-safe and async-safe global request rate limiter enforcing strict requests
 """
 
 import asyncio
+import math
 import time
 from typing import Optional
 
@@ -16,14 +17,42 @@ class GlobalRateLimiter:
     """
 
     def __init__(self, max_requests_per_second: float = 5.0, burst: Optional[int] = None):
+        # 1. Type validation for max_requests_per_second: reject booleans and non-numeric types
         if isinstance(max_requests_per_second, bool) or not isinstance(max_requests_per_second, (int, float)):
-            raise TypeError(f"max_requests_per_second must be numeric, got {type(max_requests_per_second).__name__}: {max_requests_per_second}")
-        if burst is not None and (isinstance(burst, bool) or not isinstance(burst, int)):
-            raise TypeError(f"burst must be an integer, got {type(burst).__name__}: {burst}")
+            raise TypeError(
+                f"max_requests_per_second must be numeric, got {type(max_requests_per_second).__name__}: {max_requests_per_second}"
+            )
+
+        # 2. Reject NaN, positive infinity, negative infinity
+        try:
+            if not math.isfinite(max_requests_per_second):
+                raise ValueError(
+                    f"max_requests_per_second cannot be NaN or Infinity, got {max_requests_per_second}"
+                )
+        except OverflowError:
+            raise ValueError(
+                f"max_requests_per_second exceeds numeric bounds (OverflowError): {max_requests_per_second}"
+            )
+
+        # 3. Enforce lower (> 0) and upper (<= 1,000,000) bounds
         if max_requests_per_second <= 0:
             raise ValueError(f"max_requests_per_second must be positive (> 0), got {max_requests_per_second}")
+        if max_requests_per_second > 1_000_000:
+            raise ValueError(
+                f"max_requests_per_second exceeds maximum allowable limit (1,000,000), got {max_requests_per_second}"
+            )
+
+        # 4. Strict validation for burst: integer, reject booleans, min 1, max 1,000,000
+        if burst is not None:
+            if isinstance(burst, bool) or not isinstance(burst, int):
+                raise TypeError(f"burst must be an integer, got {type(burst).__name__}: {burst}")
+            if burst < 1:
+                raise ValueError(f"burst must be at least 1, got {burst}")
+            if burst > 1_000_000:
+                raise ValueError(f"burst exceeds maximum allowable limit (1,000,000), got {burst}")
+
+        # 5. Validation occurs before assigning instance state
         self.rate = float(max_requests_per_second)
-        # Prevent bursts if strict pacing is required; default burst capacity = 1
         self.max_tokens = float(burst if burst is not None else 1.0)
         self.tokens = self.max_tokens
         self.last_updated = time.monotonic()

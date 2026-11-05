@@ -6,11 +6,32 @@ Handles lifecycle management, discovery, and manipulation of bug bounty program 
 import os
 import shutil
 import json
+import errno
 from pathlib import Path
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Union
 import yaml
 
 from src.core.program_profile import ProgramProfile, PolicyParser, PolicyValidator
+
+
+def safe_lexists(path: Union[str, Path]) -> bool:
+    """
+    Check if a filesystem entry exists (including broken symlinks) without masking
+    PermissionError or unexpected filesystem OSError conditions.
+
+    Returns True if the path exists (or is a symlink, regardless of target existence).
+    Returns False ONLY if FileNotFoundError or ENOTDIR occurs (demonstrably absent).
+    Propagates PermissionError (EACCES/EPERM) and all unexpected filesystem OSError conditions.
+    """
+    try:
+        os.lstat(path)
+        return True
+    except FileNotFoundError:
+        return False
+    except OSError as err:
+        if err.errno in (errno.ENOENT, errno.ENOTDIR):
+            return False
+        raise
 
 
 class ProgramManager:
@@ -22,17 +43,20 @@ class ProgramManager:
         else:
             # Root directory of NightCrawler project
             self.base_dir = Path(__file__).parent.parent.parent / "programs"
-        self.base_dir.mkdir(parents=True, exist_ok=True)
 
     def list_profiles(self) -> List[Dict[str, Any]]:
         """Return summary of all available program profiles."""
+        if not safe_lexists(self.base_dir):
+            return []
+        if not self.base_dir.is_dir():
+            raise ValueError(f"Program profile repository path '{self.base_dir}' is not a directory.")
         profiles = []
         for p_dir in self.base_dir.iterdir():
             if p_dir.is_dir():
                 yaml_file = p_dir / "program.yaml"
                 json_file = p_dir / "program.json"
-                has_y = os.path.lexists(yaml_file)
-                has_j = os.path.lexists(json_file)
+                has_y = safe_lexists(yaml_file)
+                has_j = safe_lexists(json_file)
                 if has_y and has_j:
                     profiles.append({
                         "id": p_dir.name,
@@ -96,21 +120,40 @@ class ProgramManager:
     def find_profile_path(self, program_id: str) -> Optional[Path]:
         """
         Locate the profile directory or filesystem entry for program_id in base_dir.
-        Uses case-insensitive matching and os.path.lexists to detect symlinks and unusual objects.
-        Returns None if and only if the profile is genuinely absent according to documented rule:
-        no directory, regular file, symlink, or other filesystem object matching program_id
-        exists in base_dir.
+        Uses case-insensitive matching and os.lstat to detect symlinks and unusual objects
+        without masking PermissionError or unexpected filesystem OSError conditions.
+
+        Missing-directory fallback rule:
+        If self.base_dir is demonstrably absent (does not exist on the filesystem),
+        no profile can be present. Returns None, permitting fallback to base configuration.
+        An inaccessible directory (PermissionError or I/O error) is NOT treated as absent.
+
+        Failure modes:
+        - If self.base_dir is inaccessible (PermissionError or filesystem OSError), propagates error.
+        - If self.base_dir exists but is not a directory, raises ValueError.
+        - If iteration over self.base_dir encounters PermissionError or filesystem OSError, propagates error.
+        - If the profile is demonstrably absent after successful iteration, returns None.
+        - If a matching entry is found, returns the Path to that entry.
         """
+        # 1. Distinguish demonstrably missing base_dir from inaccessible base_dir
+        if not safe_lexists(self.base_dir):
+            return None
+
+        # Ensure base_dir is actually a directory (or valid symlink to directory)
+        if not self.base_dir.is_dir():
+            raise ValueError(f"Program profile repository path '{self.base_dir}' is an unexpected filesystem object (expected a directory).")
+
         clean_id = program_id.strip().lower()
         direct = self.base_dir / clean_id
-        if os.path.lexists(direct):
+        if safe_lexists(direct):
             return direct
-        try:
-            for sub in self.base_dir.iterdir():
-                if sub.name.lower() == clean_id and os.path.lexists(sub):
-                    return sub
-        except (OSError, PermissionError):
-            pass
+
+        # 2. Case-insensitive search across directory entries.
+        # Do NOT catch PermissionError or unexpected OSError - propagate them!
+        for sub in self.base_dir.iterdir():
+            if sub.name.lower() == clean_id and safe_lexists(sub):
+                return sub
+
         return None
 
     def profile_exists(self, program_id: str) -> bool:
@@ -119,6 +162,7 @@ class ProgramManager:
         Returns False ONLY when the profile is genuinely absent according to documented rule:
         no directory, file, symlink, or filesystem entry matching program_id exists in base_dir.
         Returns True if any matching filesystem entry exists.
+        Propagates PermissionError and unexpected filesystem OSError conditions.
         """
         return self.find_profile_path(program_id) is not None
 
@@ -144,10 +188,16 @@ class ProgramManager:
         if target_path.is_symlink():
             try:
                 resolved_dir = target_path.resolve(strict=True)
-            except (OSError, FileNotFoundError):
+            except FileNotFoundError:
                 raise ValueError(
                     f"Program profile path '{target_path}' is a broken symlink pointing to a non-existent target."
                 )
+            except OSError as err:
+                if err.errno in (errno.ENOENT, errno.ENOTDIR):
+                    raise ValueError(
+                        f"Program profile path '{target_path}' is a broken symlink pointing to a non-existent target."
+                    )
+                raise
             if not resolved_dir.is_dir():
                 raise ValueError(
                     f"Program profile path '{target_path}' resolves to an unexpected filesystem object (not a directory): {resolved_dir}"
@@ -163,8 +213,8 @@ class ProgramManager:
         yaml_file = resolved_dir / "program.yaml"
         json_file = resolved_dir / "program.json"
 
-        has_yaml = os.path.lexists(yaml_file)
-        has_json = os.path.lexists(json_file)
+        has_yaml = safe_lexists(yaml_file)
+        has_json = safe_lexists(json_file)
 
         if has_yaml and has_json:
             raise ValueError(
@@ -184,8 +234,12 @@ class ProgramManager:
         if target_file.is_symlink():
             try:
                 resolved_file = target_file.resolve(strict=True)
-            except (OSError, FileNotFoundError):
+            except FileNotFoundError:
                 raise ValueError(f"Profile file '{target_file}' is a broken symlink.")
+            except OSError as err:
+                if err.errno in (errno.ENOENT, errno.ENOTDIR):
+                    raise ValueError(f"Profile file '{target_file}' is a broken symlink.")
+                raise
             if not resolved_file.is_file():
                 raise ValueError(
                     f"Profile file '{target_file}' resolves to an unexpected filesystem object (expected regular file): {resolved_file}"
