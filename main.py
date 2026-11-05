@@ -131,10 +131,26 @@ def main(ctx, target, target_list, urls, output, concurrency, depth, timeout,
             click.echo(click.style(f"    Available programs: {', '.join([p['id'] for p in pm.list_profiles()])}\n", fg='yellow'))
             sys.exit(1)
     else:
-        # Check if uxcam profile exists as default
-        try:
-            active_profile = pm.get_profile("uxcam")
-        except Exception:
+        # Check if default program profile exists on disk
+        default_program = "uxcam"
+        if pm.profile_exists(default_program):
+            try:
+                active_profile = pm.get_profile(default_program)
+                if active_profile:
+                    errors = PolicyValidator.validate(active_profile)
+                    if errors:
+                        click.echo(click.style(
+                            f"\n[!] POLICY ERROR: Default program profile '{default_program}' failed validation: {'; '.join(errors)}\n",
+                            fg='red', bold=True
+                        ))
+                        sys.exit(1)
+            except Exception as e:
+                click.echo(click.style(
+                    f"\n[!] ERROR: Failed to load default program profile '{default_program}': {e}\n",
+                    fg='red', bold=True
+                ))
+                sys.exit(1)
+        else:
             active_profile = None
 
     # Load base fallback configuration

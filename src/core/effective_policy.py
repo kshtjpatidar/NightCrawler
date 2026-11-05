@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from typing import Dict, Any, List, Optional, Set
 
 from src.core.program_profile import (
-    ProgramProfile, PolicyValidator, strict_bool, strict_positive_float, strict_positive_int, parse_authorized_providers
+    ProgramProfile, PolicyValidator, PolicyValidationError, strict_bool, strict_positive_float, strict_positive_int, parse_authorized_providers
 )
 from src.core.scope import ScopeManager
 from src.core.request_policy import RequestPolicyManager
@@ -25,11 +25,6 @@ from src.core.audit_logger import AuditLogger
 from src.core.rate_limiter import GlobalRateLimiter
 from src.core.header_manager import HeaderManager
 from src.core.request_config import NightCrawlerConfig
-
-
-class PolicyValidationError(ValueError, TypeError):
-    """Raised when an EffectivePolicy numeric or security setting fails strict validation."""
-    pass
 
 
 @dataclass

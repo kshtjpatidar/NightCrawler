@@ -408,3 +408,224 @@ def test_strict_helpers_convert_overflow_and_unusual_types_to_clean_errors():
 
     with pytest.raises(TypeError, match="Expected integer"):
         strict_positive_int(Decimal("5"), "concurrency")
+
+
+# ============================================================================
+# SECTION 3: FINDING 1 - STRICT PROFILE NUMERIC PARSING (NO SILENT COERCION)
+# ============================================================================
+
+@pytest.fixture
+def base_profile_dict():
+    """Valid base profile dictionary for mutation testing."""
+    return {
+        "id": "audit-target",
+        "name": "Audit Target",
+        "version": "1.0.0",
+        "scope": {
+            "enabled": True,
+            "allowed_domains": ["audit.example.com"]
+        },
+        "request_policy": {
+            "max_rps": 5.0,
+            "per_host_rps": 5.0,
+            "concurrency": 2,
+            "timeout": 30,
+            "crawl_depth": 1,
+            "max_retries": 2,
+            "burst": 1
+        }
+    }
+
+
+@pytest.mark.parametrize("field_name", ["concurrency", "timeout", "crawl_depth", "max_retries", "burst"])
+@pytest.mark.parametrize("coercive_val", [
+    True,
+    False,
+    2.5,
+    2.0,
+    1.0,
+    "10",
+    "1",
+    "abc",
+    Decimal("5"),
+    complex(1, 2),
+    10**1000,
+    10_000_000
+])
+def test_program_profile_from_dict_rejects_integer_coercion(base_profile_dict, field_name, coercive_val):
+    """Verify ProgramProfile.from_dict rejects booleans, floats, strings, and overflow in integer fields."""
+    data = dict(base_profile_dict)
+    data["request_policy"] = dict(base_profile_dict["request_policy"])
+    data["request_policy"][field_name] = coercive_val
+
+    with pytest.raises((ValueError, TypeError, PolicyValidationError)) as exc_info:
+        ProgramProfile.from_dict(data)
+
+    err = str(exc_info.value).lower()
+    assert field_name in err, f"Error message must identify field '{field_name}', got: {exc_info.value}"
+
+
+@pytest.mark.parametrize("field_name", ["concurrency", "timeout", "crawl_depth", "burst"])
+@pytest.mark.parametrize("non_positive_int", [0, -1, -5])
+def test_program_profile_from_dict_rejects_non_positive_integers(base_profile_dict, field_name, non_positive_int):
+    """Verify ProgramProfile.from_dict rejects zero and negative values for positive-only integer fields."""
+    data = dict(base_profile_dict)
+    data["request_policy"] = dict(base_profile_dict["request_policy"])
+    data["request_policy"][field_name] = non_positive_int
+
+    with pytest.raises((ValueError, TypeError, PolicyValidationError)) as exc_info:
+        ProgramProfile.from_dict(data)
+
+    err = str(exc_info.value).lower()
+    assert field_name in err
+
+
+@pytest.mark.parametrize("field_name", ["max_rps", "per_host_rps"])
+@pytest.mark.parametrize("coercive_rate_val", [
+    True,
+    False,
+    "5.0",
+    "10",
+    "abc",
+    0,
+    0.0,
+    -1,
+    -5.0,
+    float("nan"),
+    float("inf"),
+    float("-inf"),
+    Decimal("5.0"),
+    complex(1, 2),
+    10**1000,
+    10_000_000
+])
+def test_program_profile_from_dict_rejects_float_rate_coercion(base_profile_dict, field_name, coercive_rate_val):
+    """Verify ProgramProfile.from_dict rejects booleans, strings, non-positive, NaN, Inf, and overflow in rate fields."""
+    data = dict(base_profile_dict)
+    data["request_policy"] = dict(base_profile_dict["request_policy"])
+    data["request_policy"][field_name] = coercive_rate_val
+
+    with pytest.raises((ValueError, TypeError, PolicyValidationError)) as exc_info:
+        ProgramProfile.from_dict(data)
+
+    err = str(exc_info.value).lower()
+    assert field_name in err, f"Error message must identify field '{field_name}', got: {exc_info.value}"
+
+
+@pytest.mark.parametrize("invalid_port", [True, False, 80.5, 443.0, "80", "443", 0, -1, 70000, 10**1000])
+def test_program_profile_scope_allowed_ports_rejects_coercion(base_profile_dict, invalid_port):
+    """Verify ProgramProfile.from_dict rejects booleans, floats, strings, and out-of-range ports."""
+    data = dict(base_profile_dict)
+    data["scope"] = dict(base_profile_dict["scope"])
+    data["scope"]["allowed_ports"] = [80, invalid_port]
+
+    with pytest.raises((ValueError, TypeError, PolicyValidationError)) as exc_info:
+        ProgramProfile.from_dict(data)
+
+    err = str(exc_info.value).lower()
+    assert "port" in err or "allowed_ports" in err
+
+
+# ============================================================================
+# SECTION 4: FINDING 2 - DEFAULT PROFILE FALLBACK & ERROR DISTINCTION
+# ============================================================================
+
+def test_default_profile_missing_falls_back_to_valid_config():
+    """Verify that when no default profile exists on disk, main falls back to independent config validation."""
+    runner = CliRunner()
+    with patch("src.core.program_manager.ProgramManager.profile_exists", return_value=False), \
+         patch("src.core.program_manager.ProgramManager.get_profile", return_value=None), \
+         patch("src.core.scanner.NightCrawlerScanner.__init__", return_value=None) as mock_scanner, \
+         patch("asyncio.run", return_value=None):
+
+        result = runner.invoke(main, ["-t", "uxcam.com", "--no-prompt"])
+
+        # Scan should proceed without error using fallback configuration
+        assert "failed to load default program profile" not in result.output.lower()
+        assert "policy error" not in result.output.lower()
+        assert mock_scanner.call_count == 1, "Scanner should be initialized using valid fallback configuration"
+
+
+def test_default_profile_malformed_yaml_fails_closed_before_network():
+    """Verify that malformed YAML in existing default profile aborts startup with non-zero exit."""
+    runner = CliRunner()
+    with patch("src.core.program_manager.ProgramManager.profile_exists", return_value=True), \
+         patch("src.core.program_manager.ProgramManager.get_profile", side_effect=ValueError("YAML syntax error: unclosed bracket at line 4")), \
+         patch("src.core.scanner.NightCrawlerScanner.__init__") as mock_scanner, \
+         patch("aiohttp.ClientSession.__init__") as mock_session, \
+         patch("aiohttp.TCPConnector.__init__") as mock_conn, \
+         patch("subprocess.Popen") as mock_popen:
+
+        result = runner.invoke(main, ["-t", "uxcam.com", "--no-prompt"])
+
+        assert result.exit_code != 0
+        assert "failed to load default program profile 'uxcam'" in result.output.lower()
+        assert "yaml syntax error" in result.output.lower()
+        assert mock_scanner.call_count == 0, "Scanner must not be instantiated when default profile is malformed"
+        assert mock_session.call_count == 0, "HTTP session must not be created when default profile is malformed"
+        assert mock_conn.call_count == 0, "TCP connector must not be created when default profile is malformed"
+        assert mock_popen.call_count == 0, "Subprocess must not be launched when default profile is malformed"
+
+
+def test_default_profile_unreadable_permission_denied_fails_closed_before_network():
+    """Verify that permission error on existing default profile aborts startup with non-zero exit."""
+    runner = CliRunner()
+    with patch("src.core.program_manager.ProgramManager.profile_exists", return_value=True), \
+         patch("src.core.program_manager.ProgramManager.get_profile", side_effect=PermissionError("Permission denied: 'programs/uxcam/program.yaml'")), \
+         patch("src.core.scanner.NightCrawlerScanner.__init__") as mock_scanner, \
+         patch("aiohttp.ClientSession.__init__") as mock_session, \
+         patch("aiohttp.TCPConnector.__init__") as mock_conn, \
+         patch("subprocess.Popen") as mock_popen:
+
+        result = runner.invoke(main, ["-t", "uxcam.com", "--no-prompt"])
+
+        assert result.exit_code != 0
+        assert "failed to load default program profile 'uxcam'" in result.output.lower()
+        assert "permission denied" in result.output.lower()
+        assert mock_scanner.call_count == 0
+        assert mock_session.call_count == 0
+        assert mock_conn.call_count == 0
+        assert mock_popen.call_count == 0
+
+
+def test_default_profile_invalid_policy_fails_closed_before_network():
+    """Verify that invalid policy in existing default profile aborts startup before network activity."""
+    runner = CliRunner()
+    fake_profile = ProgramProfile(id="uxcam", name="UXCam Broken")
+    with patch("src.core.program_manager.ProgramManager.profile_exists", return_value=True), \
+         patch("src.core.program_manager.ProgramManager.get_profile", return_value=fake_profile), \
+         patch("src.core.program_profile.PolicyValidator.validate", return_value=["Insecure TLS configuration is prohibited", "concurrency must be at least 1"]), \
+         patch("src.core.scanner.NightCrawlerScanner.__init__") as mock_scanner, \
+         patch("aiohttp.ClientSession.__init__") as mock_session, \
+         patch("aiohttp.TCPConnector.__init__") as mock_conn, \
+         patch("subprocess.Popen") as mock_popen:
+
+        result = runner.invoke(main, ["-t", "uxcam.com", "--no-prompt"])
+
+        assert result.exit_code != 0
+        assert "default program profile 'uxcam' failed validation" in result.output.lower()
+        assert "insecure tls configuration is prohibited" in result.output.lower()
+        assert mock_scanner.call_count == 0
+        assert mock_session.call_count == 0
+        assert mock_conn.call_count == 0
+        assert mock_popen.call_count == 0
+
+
+def test_default_profile_errors_do_not_leak_canary_secrets():
+    """Verify default profile load errors do not leak canary secret tokens into output."""
+    canary_secret = "SYNTHETIC_CANARY_SECRET_PROFILE_TOKEN_888"
+    runner = CliRunner()
+    with patch("src.core.program_manager.ProgramManager.profile_exists", return_value=True), \
+         patch("src.core.program_manager.ProgramManager.get_profile", side_effect=ValueError("Corrupted profile data: syntax error")), \
+         patch("src.core.scanner.NightCrawlerScanner.__init__") as mock_scanner:
+
+        result = runner.invoke(
+            main,
+            ["-t", "uxcam.com", "--no-prompt"],
+            env={"NIGHTCRAWLER_RESEARCHER_ID": canary_secret, "NIGHTCRAWLER_SECRET_KEY": canary_secret}
+        )
+
+        assert result.exit_code != 0
+        assert canary_secret not in result.output, "Canary secret token was leaked in startup error output!"
+        assert mock_scanner.call_count == 0
+

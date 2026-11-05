@@ -63,33 +63,52 @@ class ProgramManager:
                         })
         return sorted(profiles, key=lambda x: x["id"])
 
+    def profile_exists(self, program_id: str) -> bool:
+        """Check if a program profile file or directory exists on disk."""
+        clean_id = program_id.strip().lower()
+        prog_dir = self.base_dir / clean_id
+        if prog_dir.exists():
+            if (prog_dir / "program.yaml").exists() or (prog_dir / "program.json").exists():
+                return True
+        for sub in self.base_dir.iterdir():
+            if sub.is_dir() and sub.name.lower() == clean_id:
+                if (sub / "program.yaml").exists() or (sub / "program.json").exists():
+                    return True
+        return False
+
     def get_profile(self, program_id: str) -> Optional[ProgramProfile]:
         """Load and return a program profile by ID or directory name."""
         clean_id = program_id.strip().lower()
         prog_dir = self.base_dir / clean_id
-        if not prog_dir.exists():
+        target_file = None
+
+        if prog_dir.exists():
+            y_file = prog_dir / "program.yaml"
+            j_file = prog_dir / "program.json"
+            if y_file.exists():
+                target_file = y_file
+            elif j_file.exists():
+                target_file = j_file
+
+        if target_file is None:
             # Try searching by id match across all profiles
             for sub in self.base_dir.iterdir():
                 if sub.is_dir():
                     y_file = sub / "program.yaml"
                     j_file = sub / "program.json"
                     f = y_file if y_file.exists() else (j_file if j_file.exists() else None)
-                    if f:
-                        try:
-                            prof = PolicyParser.from_yaml_file(f) if f.suffix == ".yaml" else PolicyParser.from_json_file(f)
-                            if prof.id.lower() == clean_id:
-                                return prof
-                        except Exception:
-                            pass
+                    if f and sub.name.lower() == clean_id:
+                        target_file = f
+                        break
+
+        if target_file is None:
             return None
 
-        y_file = prog_dir / "program.yaml"
-        j_file = prog_dir / "program.json"
-        if y_file.exists():
-            return PolicyParser.from_yaml_file(y_file)
-        elif j_file.exists():
-            return PolicyParser.from_json_file(j_file)
-        return None
+        # Do not swallow exceptions: malformed YAML, PermissionError, PolicyValidationError raise directly
+        if target_file.suffix == ".yaml":
+            return PolicyParser.from_yaml_file(target_file)
+        else:
+            return PolicyParser.from_json_file(target_file)
 
     def validate_profile(self, program_id: str) -> List[str]:
         """Validate a profile by ID."""

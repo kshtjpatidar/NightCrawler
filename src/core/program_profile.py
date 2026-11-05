@@ -34,6 +34,61 @@ def strict_bool(val: Any, field_name: str = "field") -> bool:
     raise TypeError(f"Expected boolean for {field_name}, got {type(val).__name__}")
 
 
+class PolicyValidationError(ValueError, TypeError):
+    """Raised when an EffectivePolicy or ProgramProfile numeric or security setting fails strict validation."""
+    pass
+
+
+def validate_profile_int(val: Any, field_name: str, min_val: int = 1, max_val: int = 1_000_000, context: str = "profile") -> int:
+    """
+    Validate integer-only profile fields without permissive type coercion.
+    Strictly rejects booleans, floats (including integral floats), numeric strings, and non-ints.
+    Rejects values outside [min_val, max_val], and extreme integers causing OverflowError.
+    """
+    if isinstance(val, bool):
+        raise PolicyValidationError(f"Program profile failed policy validation: Expected integer for {field_name}, got bool: {val}")
+    if isinstance(val, float):
+        raise PolicyValidationError(f"Program profile failed policy validation: Expected integer for {field_name}, got float: {val}")
+    if isinstance(val, str):
+        raise PolicyValidationError(f"Program profile failed policy validation: Expected integer for {field_name}, got str: '{val}'")
+    if type(val) is not int:
+        raise PolicyValidationError(f"Program profile failed policy validation: Expected integer for {field_name}, got {type(val).__name__}")
+    try:
+        if not math.isfinite(val):
+            raise PolicyValidationError(f"Program profile failed policy validation: {field_name} must be finite, got {val}")
+    except OverflowError:
+        raise PolicyValidationError(f"Program profile failed policy validation: {field_name} value exceeds numeric bounds (OverflowError): {val}")
+    if val < min_val:
+        raise PolicyValidationError(f"Program profile failed policy validation: {field_name} must be >= {min_val}, got {val}")
+    if val > max_val:
+        raise PolicyValidationError(f"Program profile failed policy validation: {field_name} exceeds maximum allowable limit ({max_val:,}), got {val}")
+    return val
+
+
+def validate_profile_float(val: Any, field_name: str, min_val: float = 0.0001, max_val: float = 1_000_000.0, context: str = "profile") -> float:
+    """
+    Validate float rate fields without permissive type coercion.
+    Strictly rejects booleans, strings, non-numeric types, NaN, infinities, zero/negative, and values above max_val.
+    """
+    if isinstance(val, bool):
+        raise PolicyValidationError(f"Program profile failed policy validation: Expected numeric value for {field_name}, got bool: {val}")
+    if isinstance(val, str):
+        raise PolicyValidationError(f"Program profile failed policy validation: Expected numeric value for {field_name}, got str: '{val}'")
+    if type(val) not in (int, float):
+        raise PolicyValidationError(f"Program profile failed policy validation: Expected numeric value for {field_name}, got {type(val).__name__}")
+    try:
+        f = float(val)
+        if not math.isfinite(f):
+            raise PolicyValidationError(f"Program profile failed policy validation: {field_name} cannot be NaN or Infinity, got {val}")
+    except OverflowError:
+        raise PolicyValidationError(f"Program profile failed policy validation: {field_name} value exceeds numeric bounds (OverflowError): {val}")
+    if f <= 0:
+        raise PolicyValidationError(f"Program profile failed policy validation: {field_name} must be strictly positive (> 0), got {val}")
+    if f > max_val:
+        raise PolicyValidationError(f"Program profile failed policy validation: {field_name} exceeds maximum allowable limit ({int(max_val):,}), got {val}")
+    return f
+
+
 def strict_positive_float(val: Any, field_name: str = "rate") -> float:
     """Strictly validate positive, non-NaN, non-Inf float."""
     if isinstance(val, bool):
@@ -328,9 +383,9 @@ class ProgramProfile:
             yaml.dump(data, f, default_flow_style=False, sort_keys=False)
 
     @classmethod
-    def from_dict(cls, data: Dict[str, Any], source_ref: str = "") -> "ProgramProfile":
+    def from_dict(cls, data: Dict[str, Any], source_ref: str = "", strict_numeric: bool = True) -> "ProgramProfile":
         """Convenience method delegating to PolicyParser.from_dict."""
-        return PolicyParser.from_dict(data, source_ref=source_ref)
+        return PolicyParser.from_dict(data, source_ref=source_ref, strict_numeric=strict_numeric)
 
 
 class PolicyParser:
@@ -345,7 +400,7 @@ class PolicyParser:
         return re.sub(r'\$\{([A-Za-z0-9_]+)\}|\$([A-Za-z0-9_]+)', repl, text)
 
     @classmethod
-    def from_dict(cls, data: Dict[str, Any], source_ref: str = "") -> ProgramProfile:
+    def from_dict(cls, data: Dict[str, Any], source_ref: str = "", strict_numeric: bool = True) -> ProgramProfile:
         """Instantiate ProgramProfile from dictionary."""
         if not isinstance(data, dict):
             raise ValueError(f"Program profile data must be a dictionary, got {type(data).__name__}")
@@ -391,7 +446,10 @@ class PolicyParser:
             allowed_paths=[p.strip() for p in scope_raw.get("allowed_paths", []) if p.strip()],
             excluded_paths=[p.strip() for p in scope_raw.get("excluded_paths", []) if p.strip()],
             allowed_protocols=[pr.lower().strip() for pr in scope_raw.get("allowed_protocols", ["http", "https"])],
-            allowed_ports=[int(p) for p in scope_raw.get("allowed_ports", [80, 443, 8080, 8443])],
+            allowed_ports=[
+                validate_profile_int(p, "scope.allowed_ports", min_val=1, max_val=65535, context=f"profile '{p_id}'") if strict_numeric else int(p)
+                for p in scope_raw.get("allowed_ports", [80, 443, 8080, 8443])
+            ],
             third_party_hosted_exclusions=[h.strip() for h in scope_raw.get("third_party_hosted_exclusions", []) if h.strip()]
         )
 
@@ -407,42 +465,33 @@ class PolicyParser:
             raise ValueError(f"Unknown key(s) in profile request_policy: {sorted(unknown_rp)}.")
 
         max_rps_val = rp_raw.get("max_rps", 5.0)
-        try:
-            max_rps = float(max_rps_val)
-        except (ValueError, TypeError, OverflowError):
-            raise ValueError(f"Invalid numeric value for request_policy.max_rps: {max_rps_val}")
+        max_rps = validate_profile_float(max_rps_val, "request_policy.max_rps", context=f"profile '{p_id}'") if strict_numeric else float(max_rps_val)
 
         concurrency_val = rp_raw.get("concurrency", 1)
-        try:
-            concurrency = int(concurrency_val)
-        except (ValueError, TypeError, OverflowError):
-            raise ValueError(f"Invalid integer value for request_policy.concurrency: {concurrency_val}")
+        concurrency = validate_profile_int(concurrency_val, "request_policy.concurrency", min_val=1, context=f"profile '{p_id}'") if strict_numeric else int(concurrency_val)
 
         timeout_val = rp_raw.get("timeout", 30)
-        try:
-            timeout = int(timeout_val)
-        except (ValueError, TypeError, OverflowError):
-            raise ValueError(f"Invalid integer value for request_policy.timeout: {timeout_val}")
+        timeout = validate_profile_int(timeout_val, "request_policy.timeout", min_val=1, context=f"profile '{p_id}'") if strict_numeric else int(timeout_val)
 
         crawl_depth_val = rp_raw.get("crawl_depth", 1)
-        try:
-            crawl_depth = int(crawl_depth_val)
-        except (ValueError, TypeError, OverflowError):
-            raise ValueError(f"Invalid integer value for request_policy.crawl_depth: {crawl_depth_val}")
+        crawl_depth = validate_profile_int(crawl_depth_val, "request_policy.crawl_depth", min_val=1, context=f"profile '{p_id}'") if strict_numeric else int(crawl_depth_val)
 
         per_host_rps_val = rp_raw.get("per_host_rps", max_rps)
-        try:
-            per_host_rps = float(per_host_rps_val)
-        except (ValueError, TypeError, OverflowError):
-            raise ValueError(f"Invalid numeric value for request_policy.per_host_rps: {per_host_rps_val}")
+        per_host_rps = validate_profile_float(per_host_rps_val, "request_policy.per_host_rps", context=f"profile '{p_id}'") if strict_numeric else float(per_host_rps_val)
+
+        max_retries_val = rp_raw.get("max_retries", 2)
+        max_retries = validate_profile_int(max_retries_val, "request_policy.max_retries", min_val=0, context=f"profile '{p_id}'") if strict_numeric else int(max_retries_val)
+
+        burst_val = rp_raw.get("burst", 1)
+        burst = validate_profile_int(burst_val, "request_policy.burst", min_val=1, context=f"profile '{p_id}'") if strict_numeric else int(burst_val)
 
         request_policy = RequestPolicyDefinition(
             max_rps=max_rps,
             concurrency=concurrency,
             timeout=timeout,
-            max_retries=int(rp_raw.get("max_retries", 2)),
+            max_retries=max_retries,
             crawl_depth=crawl_depth,
-            burst=int(rp_raw.get("burst", 1)),
+            burst=burst,
             verify_tls=strict_bool(rp_raw.get("verify_tls", True), "request_policy.verify_tls") if "verify_tls" in rp_raw else True,
             strict_scope=strict_bool(rp_raw.get("strict_scope", True), "request_policy.strict_scope") if "strict_scope" in rp_raw else True,
             per_host_rps=per_host_rps

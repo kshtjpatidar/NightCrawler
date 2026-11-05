@@ -54,23 +54,41 @@ def test_program_manager_discovery_and_listing():
 
 def test_program_validation_rules():
     """Verify PolicyValidator enforces strict safety rules and parameter sanity."""
-    # 1. Non-positive RPS rejected
+    from src.core.program_profile import PolicyValidationError
+
+    # Strict parsing rejects non-positive or NaN RPS immediately
+    with pytest.raises((ValueError, PolicyValidationError)):
+        ProgramProfile.from_dict({
+            "id": "bad-rps",
+            "name": "Bad RPS",
+            "scope": {"allowed_domains": ["test.com"]},
+            "request_policy": {"max_rps": 0}
+        })
+    with pytest.raises((ValueError, PolicyValidationError)):
+        ProgramProfile.from_dict({
+            "id": "nan-rps",
+            "name": "NaN RPS",
+            "scope": {"allowed_domains": ["test.com"]},
+            "request_policy": {"max_rps": float("nan")}
+        })
+
+    # 1. Non-positive RPS rejected by PolicyValidator
     p1 = PolicyParser.from_dict({
         "id": "bad-rps",
         "name": "Bad RPS",
         "scope": {"allowed_domains": ["test.com"]},
         "request_policy": {"max_rps": 0}
-    })
+    }, strict_numeric=False)
     errors = PolicyValidator.validate(p1)
     assert any("max_rps must be positive" in e for e in errors)
 
-    # 2. NaN / Inf RPS rejected
+    # 2. NaN / Inf RPS rejected by PolicyValidator
     p2 = PolicyParser.from_dict({
         "id": "nan-rps",
         "name": "NaN RPS",
         "scope": {"allowed_domains": ["test.com"]},
         "request_policy": {"max_rps": float("nan")}
-    })
+    }, strict_numeric=False)
     errors = PolicyValidator.validate(p2)
     assert any("NaN or Infinity" in e for e in errors)
 
