@@ -27,6 +27,11 @@ from src.core.header_manager import HeaderManager
 from src.core.request_config import NightCrawlerConfig
 
 
+class PolicyValidationError(ValueError, TypeError):
+    """Raised when an EffectivePolicy numeric or security setting fails strict validation."""
+    pass
+
+
 @dataclass
 class EffectivePolicy:
     """
@@ -83,16 +88,37 @@ class EffectivePolicy:
         super().__setattr__(name, value)
 
     def __post_init__(self):
-        if self.max_rps <= 0:
-            raise ValueError(f"max_rps must be positive, got {self.max_rps}")
-        if self.concurrency <= 0:
-            raise ValueError(f"concurrency must be a positive integer, got {self.concurrency}")
-        if self.timeout <= 0:
-            raise ValueError(f"timeout must be a positive integer, got {self.timeout}")
-        if self.crawl_depth <= 0:
-            raise ValueError(f"crawl_depth must be a positive integer, got {self.crawl_depth}")
+        # 1. Validate rate limits (max_rps, per_host_rps) - strictly positive finite numeric
+        for field_name in ("max_rps", "per_host_rps"):
+            val = getattr(self, field_name)
+            if isinstance(val, bool):
+                raise PolicyValidationError(f"Expected numeric value for {field_name}, got bool: {val}")
+            if isinstance(val, str):
+                raise PolicyValidationError(f"Expected numeric value for {field_name}, got str: '{val}'")
+            if not isinstance(val, (int, float)):
+                raise PolicyValidationError(f"Expected numeric value for {field_name}, got {type(val).__name__}")
+            if not math.isfinite(val):
+                raise PolicyValidationError(f"{field_name} must be finite (cannot be NaN or Infinity), got {val}")
+            if val <= 0:
+                raise PolicyValidationError(f"{field_name} must be strictly positive (> 0), got {val}")
+
+        # 2. Validate integer-only fields (concurrency, timeout, crawl_depth)
+        for field_name in ("concurrency", "timeout", "crawl_depth"):
+            val = getattr(self, field_name)
+            if isinstance(val, bool):
+                raise PolicyValidationError(f"Expected integer for {field_name}, got bool: {val}")
+            if isinstance(val, float):
+                raise PolicyValidationError(f"Expected integer for {field_name}, got float: {val}")
+            if isinstance(val, str):
+                raise PolicyValidationError(f"Expected integer for {field_name}, got str: '{val}'")
+            if type(val) is not int:
+                raise PolicyValidationError(f"Expected integer for {field_name}, got {type(val).__name__}")
+            if val <= 0:
+                raise PolicyValidationError(f"{field_name} must be strictly positive (> 0), got {val}")
+
+        # 3. Security invariant: strict_scope requires verify_tls
         if self.strict_scope and not self.verify_tls:
-            raise ValueError("Insecure TLS configuration is prohibited in strict compliance mode.")
+            raise PolicyValidationError("Insecure TLS configuration is prohibited in strict compliance mode.")
 
     @classmethod
     def build(

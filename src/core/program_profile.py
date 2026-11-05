@@ -51,10 +51,19 @@ def strict_positive_int(val: Any, field_name: str = "integer") -> int:
     """Strictly validate positive integer."""
     if isinstance(val, bool):
         raise TypeError(f"Expected integer for {field_name}, got bool")
-    try:
-        i = int(val)
-    except (ValueError, TypeError):
-        raise ValueError(f"Invalid integer value for {field_name}: {val}")
+    if isinstance(val, float):
+        raise TypeError(f"Expected integer for {field_name}, got float: {val}")
+    if isinstance(val, str):
+        if not val.strip().isdigit():
+            raise ValueError(f"Invalid integer string for {field_name}: '{val}'")
+        i = int(val.strip())
+    else:
+        try:
+            if not isinstance(val, int):
+                raise TypeError(f"Expected integer for {field_name}, got {type(val).__name__}")
+            i = int(val)
+        except (ValueError, TypeError):
+            raise ValueError(f"Invalid integer value for {field_name}: {val}")
     if i <= 0:
         raise ValueError(f"{field_name} must be strictly positive (> 0), got {val}")
     return i

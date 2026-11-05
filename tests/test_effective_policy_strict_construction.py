@@ -217,25 +217,140 @@ def test_effective_policy_reassignment_rejected():
 # ==============================================================================
 
 def test_invalid_direct_construction_fails_before_http_transport_or_scanner():
-    """Invalid policy construction aborts before any HTTP client, validator, or scanner can be constructed."""
-    args = make_dummy_policy_args(authorized_providers=["attacker; injection"])
+    """Invalid policy construction aborts before any HTTP client, connector, session, scanner, or subprocess can be created."""
+    with patch("src.core.http_client.NightCrawlerHttpClient.__init__", autospec=True) as mock_client_init, \
+         patch("aiohttp.TCPConnector.__init__", autospec=True) as mock_connector_init, \
+         patch("aiohttp.ClientSession.__init__", autospec=True) as mock_session_init, \
+         patch("src.core.scanner.NightCrawlerScanner.__init__", autospec=True) as mock_scanner_init, \
+         patch("src.validators.keyhacks.KeyHacksValidator.__init__", autospec=True) as mock_validator_init, \
+         patch("subprocess.Popen", autospec=True) as mock_popen, \
+         patch("subprocess.run", autospec=True) as mock_run:
 
-    policy_created = False
-    try:
-        policy = EffectivePolicy(**args)
-        policy_created = True
-        # If policy creation had succeeded, downstream components would be initialized
-        client = NightCrawlerHttpClient(effective_policy=policy)
-        validator = KeyHacksValidator(effective_policy=policy)
-        scanner = NightCrawlerScanner(effective_policy=policy)
-    except ValueError:
-        pass
+        # 1. Invalid provider string
+        with pytest.raises((ValueError, TypeError)):
+            EffectivePolicy(**make_dummy_policy_args(authorized_providers=["attacker; injection"]))
 
-    assert not policy_created, "EffectivePolicy with invalid providers must not be constructed"
+        # 2. NaN in max_rps
+        with pytest.raises((ValueError, TypeError)):
+            EffectivePolicy(**make_dummy_policy_args(max_rps=float("nan")))
+
+        # 3. Fractional float in concurrency
+        with pytest.raises((ValueError, TypeError)):
+            EffectivePolicy(**make_dummy_policy_args(concurrency=2.5))
+
+        # 4. Insecure TLS with strict_scope
+        with pytest.raises((ValueError, TypeError)):
+            EffectivePolicy(**make_dummy_policy_args(strict_scope=True, verify_tls=False))
+
+        # 5. Negative timeout
+        with pytest.raises((ValueError, TypeError)):
+            EffectivePolicy(**make_dummy_policy_args(timeout=-5))
+
+        # Assert every downstream constructor/session/subprocess spy has zero calls
+        assert mock_client_init.call_count == 0
+        assert mock_connector_init.call_count == 0
+        assert mock_session_init.call_count == 0
+        assert mock_scanner_init.call_count == 0
+        assert mock_validator_init.call_count == 0
+        assert mock_popen.call_count == 0
+        assert mock_run.call_count == 0
 
 
 # ==============================================================================
-# 6. Preservation of Policy Provider Narrowing Behavior
+# 6. Numeric Field Validation: NaN, Inf, Booleans, Fractions, Strings, Boundaries
+# ==============================================================================
+
+@pytest.mark.parametrize("field_name", ["max_rps", "per_host_rps", "timeout", "concurrency", "crawl_depth"])
+@pytest.mark.parametrize("invalid_val", [float("nan"), float("inf"), float("-inf")])
+def test_numeric_fields_reject_nan_and_inf(field_name, invalid_val):
+    """All numeric fields reject NaN, +Infinity, and -Infinity."""
+    kwargs = {field_name: invalid_val}
+    with pytest.raises((ValueError, TypeError)):
+        EffectivePolicy(**make_dummy_policy_args(**kwargs))
+
+
+@pytest.mark.parametrize("field_name", ["max_rps", "per_host_rps", "timeout", "concurrency", "crawl_depth"])
+@pytest.mark.parametrize("bool_val", [True, False])
+def test_numeric_fields_reject_booleans(field_name, bool_val):
+    """Numeric fields strictly reject boolean values (True/False)."""
+    kwargs = {field_name: bool_val}
+    with pytest.raises((ValueError, TypeError)):
+        EffectivePolicy(**make_dummy_policy_args(**kwargs))
+
+
+@pytest.mark.parametrize("field_name", ["timeout", "concurrency", "crawl_depth"])
+@pytest.mark.parametrize("fractional_val", [1.5, 2.1, 0.5, 3.99, 2.0])
+def test_integer_only_fields_reject_fractional_floats(field_name, fractional_val):
+    """Integer-only fields strictly reject float and fractional values."""
+    kwargs = {field_name: fractional_val}
+    with pytest.raises((ValueError, TypeError)):
+        EffectivePolicy(**make_dummy_policy_args(**kwargs))
+
+
+@pytest.mark.parametrize("field_name", ["max_rps", "per_host_rps", "timeout", "concurrency", "crawl_depth"])
+@pytest.mark.parametrize("str_val", ["10", "5.5", "0", "-1", "NaN", "inf"])
+def test_numeric_fields_reject_numeric_strings(field_name, str_val):
+    """Direct construction rejects numeric strings without silent coercion."""
+    kwargs = {field_name: str_val}
+    with pytest.raises((ValueError, TypeError)):
+        EffectivePolicy(**make_dummy_policy_args(**kwargs))
+
+
+@pytest.mark.parametrize("field_name,zero_or_neg", [
+    ("max_rps", 0),
+    ("max_rps", 0.0),
+    ("max_rps", -0.01),
+    ("max_rps", -5.0),
+    ("per_host_rps", 0),
+    ("per_host_rps", -1.0),
+    ("timeout", 0),
+    ("timeout", -1),
+    ("timeout", -10),
+    ("concurrency", 0),
+    ("concurrency", -1),
+    ("crawl_depth", 0),
+    ("crawl_depth", -2),
+])
+def test_numeric_fields_reject_zero_and_negative_values(field_name, zero_or_neg):
+    """Numeric fields strictly reject zero and negative values."""
+    kwargs = {field_name: zero_or_neg}
+    with pytest.raises((ValueError, TypeError)):
+        EffectivePolicy(**make_dummy_policy_args(**kwargs))
+
+
+def test_numeric_fields_accept_valid_finite_boundary_values():
+    """Valid positive finite numeric values are properly validated and stored."""
+    policy = EffectivePolicy(**make_dummy_policy_args(
+        max_rps=0.001,
+        per_host_rps=1000.5,
+        concurrency=1,
+        timeout=1,
+        crawl_depth=1
+    ))
+    assert policy.max_rps == 0.001
+    assert policy.per_host_rps == 1000.5
+    assert policy.concurrency == 1
+    assert policy.timeout == 1
+    assert policy.crawl_depth == 1
+
+
+def test_strict_scope_cannot_coexist_with_insecure_tls():
+    """strict_scope=True requires verify_tls=True; cannot coexist with verify_tls=False."""
+    with pytest.raises((ValueError, TypeError), match="Insecure TLS"):
+        EffectivePolicy(**make_dummy_policy_args(strict_scope=True, verify_tls=False))
+
+    # Permitted configurations
+    p1 = EffectivePolicy(**make_dummy_policy_args(strict_scope=False, verify_tls=False))
+    assert p1.strict_scope is False
+    assert p1.verify_tls is False
+
+    p2 = EffectivePolicy(**make_dummy_policy_args(strict_scope=True, verify_tls=True))
+    assert p2.strict_scope is True
+    assert p2.verify_tls is True
+
+
+# ==============================================================================
+# 7. Preservation of Policy Provider Narrowing Behavior
 # ==============================================================================
 
 def test_valid_policy_construction_preserves_provider_narrowing():
