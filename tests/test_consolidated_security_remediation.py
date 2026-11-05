@@ -458,3 +458,225 @@ class TestAsyncWarningCleanup:
         assert res is None
         # Verify the coroutine object is closed
         assert coro.cr_frame is None
+
+
+# ==============================================================================
+# NC-SEC-07: Profile Directory Symlink Containment and Safe Writes
+# ==============================================================================
+
+class TestProfileSymlinkContainmentAndSafeWrites:
+    """Test suite for NC-SEC-07 profile symlink containment and safe file writing."""
+
+    def test_find_profile_path_rejects_escaping_directory_symlink(self, tmp_path):
+        """Verify find_profile_path rejects profile directory symlink pointing outside base_dir."""
+        programs_dir = tmp_path / "programs"
+        programs_dir.mkdir(parents=True)
+        outside_dir = tmp_path / "outside_profile"
+        outside_dir.mkdir(parents=True)
+        (outside_dir / "program.yaml").write_text("id: victim\nname: Victim\nscope:\n  allowed_domains: [victim.com]\nrequest_policy:\n  max_rps: 1.0\n")
+
+        os.symlink(outside_dir, programs_dir / "victim")
+        pm = ProgramManager(base_dir=programs_dir)
+
+        with pytest.raises(ValueError, match="Symlink escape detected"):
+            pm.find_profile_path("victim")
+
+    def test_find_profile_path_accepts_internal_directory_symlink(self, tmp_path):
+        """Verify find_profile_path accepts directory symlink pointing inside base_dir."""
+        programs_dir = tmp_path / "programs"
+        programs_dir.mkdir(parents=True)
+        real_dir = programs_dir / "canonical_profile"
+        real_dir.mkdir(parents=True)
+        (real_dir / "program.yaml").write_text("id: alias\nname: Alias\nscope:\n  allowed_domains: [alias.com]\nrequest_policy:\n  max_rps: 1.0\n")
+
+        os.symlink(real_dir, programs_dir / "alias")
+        pm = ProgramManager(base_dir=programs_dir)
+
+        found = pm.find_profile_path("alias")
+        assert found is not None
+        assert found.resolve() == real_dir.resolve()
+
+    def test_get_profile_rejects_escaping_directory_symlink(self, tmp_path):
+        """Verify get_profile rejects profile directory symlink pointing outside base_dir."""
+        programs_dir = tmp_path / "programs"
+        programs_dir.mkdir(parents=True)
+        outside_dir = tmp_path / "outside_profile"
+        outside_dir.mkdir(parents=True)
+        (outside_dir / "program.yaml").write_text("id: victim\nname: Victim\nscope:\n  allowed_domains: [victim.com]\nrequest_policy:\n  max_rps: 1.0\n")
+
+        os.symlink(outside_dir, programs_dir / "victim")
+        pm = ProgramManager(base_dir=programs_dir)
+
+        with pytest.raises(ValueError, match="Symlink escape detected"):
+            pm.get_profile("victim")
+
+    def test_get_profile_rejects_escaping_yaml_file_symlink(self, tmp_path):
+        """Verify get_profile rejects program.yaml symlink pointing outside base_dir."""
+        programs_dir = tmp_path / "programs"
+        prog_dir = programs_dir / "target_prog"
+        prog_dir.mkdir(parents=True)
+        outside_yaml = tmp_path / "secret.yaml"
+        outside_yaml.write_text("id: target_prog\nname: Secret\nscope:\n  allowed_domains: [secret.com]\nrequest_policy:\n  max_rps: 1.0\n")
+
+        os.symlink(outside_yaml, prog_dir / "program.yaml")
+        pm = ProgramManager(base_dir=programs_dir)
+
+        with pytest.raises(ValueError, match="Symlink escape detected"):
+            pm.get_profile("target_prog")
+
+    def test_get_profile_rejects_escaping_json_file_symlink(self, tmp_path):
+        """Verify get_profile rejects program.json symlink pointing outside base_dir."""
+        programs_dir = tmp_path / "programs"
+        prog_dir = programs_dir / "target_prog"
+        prog_dir.mkdir(parents=True)
+        outside_json = tmp_path / "secret.json"
+        outside_json.write_text('{"id": "target_prog", "name": "Secret", "scope": {"allowed_domains": ["secret.com"]}, "request_policy": {"max_rps": 1.0}}')
+
+        os.symlink(outside_json, prog_dir / "program.json")
+        pm = ProgramManager(base_dir=programs_dir)
+
+        with pytest.raises(ValueError, match="Symlink escape detected"):
+            pm.get_profile("target_prog")
+
+    def test_list_profiles_flags_escaping_symlink_as_invalid(self, tmp_path):
+        """Verify list_profiles does not load escaping symlinks and flags them with errors."""
+        programs_dir = tmp_path / "programs"
+        programs_dir.mkdir(parents=True)
+
+        # Valid profile
+        valid_dir = programs_dir / "valid_prog"
+        valid_dir.mkdir(parents=True)
+        (valid_dir / "program.yaml").write_text("id: valid_prog\nname: Valid\nscope:\n  allowed_domains: [valid.com]\nrequest_policy:\n  max_rps: 1.0\n")
+
+        # Escaping symlink
+        outside_dir = tmp_path / "outside_prog"
+        outside_dir.mkdir(parents=True)
+        (outside_dir / "program.yaml").write_text("id: escaping\nname: Escaping\nscope:\n  allowed_domains: [escape.com]\nrequest_policy:\n  max_rps: 1.0\n")
+        os.symlink(outside_dir, programs_dir / "escaping")
+
+        pm = ProgramManager(base_dir=programs_dir)
+        profiles = pm.list_profiles()
+
+        by_id = {p["id"]: p for p in profiles}
+        assert "valid_prog" in by_id
+        assert by_id["valid_prog"]["valid"] is True
+
+        assert "escaping" in by_id
+        assert by_id["escaping"]["valid"] is False
+        assert any("Symlink escape detected" in err for err in by_id["escaping"]["errors"])
+
+    def test_update_profile_refuses_symlink_directory_and_protects_canary(self, tmp_path):
+        """Verify update_profile refuses to write through a symlink directory and leaves target canary intact."""
+        programs_dir = tmp_path / "programs"
+        programs_dir.mkdir(parents=True)
+        outside_dir = tmp_path / "outside_target"
+        outside_dir.mkdir(parents=True)
+        canary = outside_dir / "program.yaml"
+        canary.write_text("CANARY_CONTENT_INITIAL")
+
+        os.symlink(outside_dir, programs_dir / "hacked")
+        pm = ProgramManager(base_dir=programs_dir)
+
+        with pytest.raises(ValueError):
+            pm.update_profile("hacked", {"name": "Malicious Update"})
+
+        assert canary.read_text() == "CANARY_CONTENT_INITIAL"
+
+    def test_update_profile_refuses_symlink_file_and_protects_canary(self, tmp_path):
+        """Verify update_profile refuses to write through a symlink program.yaml and leaves target canary intact."""
+        programs_dir = tmp_path / "programs"
+        prog_dir = programs_dir / "testprog"
+        prog_dir.mkdir(parents=True)
+        canary = tmp_path / "canary_file.yaml"
+        canary.write_text("CANARY_FILE_INITIAL")
+
+        os.symlink(canary, prog_dir / "program.yaml")
+        pm = ProgramManager(base_dir=programs_dir)
+
+        with pytest.raises(ValueError):
+            pm.update_profile("testprog", {"name": "Malicious Update"})
+
+        assert canary.read_text() == "CANARY_FILE_INITIAL"
+
+    def test_create_profile_refuses_symlink_directory_and_protects_canary(self, tmp_path):
+        """Verify create_profile refuses to write if target directory is an existing symlink."""
+        programs_dir = tmp_path / "programs"
+        programs_dir.mkdir(parents=True)
+        outside_dir = tmp_path / "outside_create"
+        outside_dir.mkdir(parents=True)
+        canary = outside_dir / "program.yaml"
+        canary.write_text("CANARY_CREATE_INITIAL")
+
+        os.symlink(outside_dir, programs_dir / "new_prog")
+        pm = ProgramManager(base_dir=programs_dir)
+
+        with pytest.raises(ValueError, match="Cannot create profile: target directory 'new_prog' is a symlink"):
+            pm.create_profile({
+                "id": "new_prog",
+                "name": "New Program",
+                "scope": {"allowed_domains": ["example.com"]},
+                "request_policy": {"max_rps": 1.0}
+            })
+
+        assert canary.read_text() == "CANARY_CREATE_INITIAL"
+
+    def test_import_profile_refuses_symlink_directory_and_protects_canary(self, tmp_path):
+        """Verify import_profile refuses to write if destination directory is an existing symlink."""
+        programs_dir = tmp_path / "programs"
+        programs_dir.mkdir(parents=True)
+        outside_dir = tmp_path / "outside_import"
+        outside_dir.mkdir(parents=True)
+        canary = outside_dir / "program.yaml"
+        canary.write_text("CANARY_IMPORT_INITIAL")
+
+        os.symlink(outside_dir, programs_dir / "import_prog")
+        pm = ProgramManager(base_dir=programs_dir)
+
+        with pytest.raises(ValueError, match="Cannot import profile: target directory 'import_prog' is a symlink"):
+            pm.import_profile(
+                "id: import_prog\nname: Import Program\nscope:\n  allowed_domains: [example.com]\nrequest_policy:\n  max_rps: 1.0\n"
+            )
+
+        assert canary.read_text() == "CANARY_IMPORT_INITIAL"
+
+    def test_duplicate_profile_refuses_symlink_directory_and_protects_canary(self, tmp_path):
+        """Verify duplicate_profile refuses to write if destination directory is an existing symlink."""
+        programs_dir = tmp_path / "programs"
+        programs_dir.mkdir(parents=True)
+        source_dir = programs_dir / "source_prog"
+        source_dir.mkdir(parents=True)
+        (source_dir / "program.yaml").write_text("id: source_prog\nname: Source Program\nscope:\n  allowed_domains: [example.com]\nrequest_policy:\n  max_rps: 1.0\n")
+
+        outside_dir = tmp_path / "outside_dup"
+        outside_dir.mkdir(parents=True)
+        canary = outside_dir / "program.yaml"
+        canary.write_text("CANARY_DUP_INITIAL")
+
+        os.symlink(outside_dir, programs_dir / "dup_target")
+        pm = ProgramManager(base_dir=programs_dir)
+
+        with pytest.raises(ValueError, match="Cannot duplicate profile: target directory 'dup_target' is a symlink"):
+            pm.duplicate_profile("source_prog", "dup_target")
+
+        assert canary.read_text() == "CANARY_DUP_INITIAL"
+
+    def test_broken_symlinks_raise_clear_error(self, tmp_path):
+        """Verify broken symlinks raise clear ValueError and do not fail silently."""
+        programs_dir = tmp_path / "programs"
+        programs_dir.mkdir(parents=True)
+        broken_sym = programs_dir / "broken"
+        os.symlink(tmp_path / "nonexistent_target", broken_sym)
+
+        pm = ProgramManager(base_dir=programs_dir)
+        with pytest.raises(ValueError, match="broken symlink"):
+            pm.get_profile("broken")
+
+    def test_filesystem_permission_errors_propagate(self, tmp_path):
+        """Verify unexpected PermissionError is propagated without swallowing."""
+        programs_dir = tmp_path / "programs"
+        programs_dir.mkdir(parents=True)
+        pm = ProgramManager(base_dir=programs_dir)
+
+        with patch.object(Path, "resolve", side_effect=PermissionError("Permission denied")):
+            with pytest.raises(PermissionError):
+                pm.find_profile_path("any")

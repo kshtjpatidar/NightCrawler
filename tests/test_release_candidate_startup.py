@@ -890,13 +890,13 @@ def test_default_profile_profile_file_is_broken_symlink_fails_closed(tmp_path):
 
 
 def test_default_profile_valid_symlink_directory_loads_successfully(tmp_path):
-    """Verify valid symlink to profile directory loads and validates successfully."""
-    real_dir = tmp_path / "real_uxcam"
+    """Verify valid internal symlink to profile directory loads and validates successfully."""
+    programs_dir = tmp_path / "programs"
+    programs_dir.mkdir(parents=True)
+    real_dir = programs_dir / "canonical_uxcam"
     real_dir.mkdir(parents=True)
     (real_dir / "program.yaml").write_text("id: uxcam\nname: UXCam\nscope:\n  allowed_domains: [uxcam.com]\nrequest_policy:\n  max_rps: 5.0\n")
 
-    programs_dir = tmp_path / "programs"
-    programs_dir.mkdir(parents=True)
     os.symlink(real_dir, programs_dir / "uxcam")
 
     pm = ProgramManager(base_dir=programs_dir)
@@ -908,13 +908,13 @@ def test_default_profile_valid_symlink_directory_loads_successfully(tmp_path):
 
 
 def test_default_profile_valid_symlink_file_loads_successfully(tmp_path):
-    """Verify valid symlink to program.yaml loads and validates successfully."""
-    real_yaml = tmp_path / "real.yaml"
-    real_yaml.write_text("id: uxcam\nname: UXCam\nscope:\n  allowed_domains: [uxcam.com]\nrequest_policy:\n  max_rps: 5.0\n")
-
+    """Verify valid internal symlink to program.yaml loads and validates successfully."""
     programs_dir = tmp_path / "programs"
     uxcam_dir = programs_dir / "uxcam"
     uxcam_dir.mkdir(parents=True)
+    real_yaml = uxcam_dir / "canonical.yaml"
+    real_yaml.write_text("id: uxcam\nname: UXCam\nscope:\n  allowed_domains: [uxcam.com]\nrequest_policy:\n  max_rps: 5.0\n")
+
     os.symlink(real_yaml, uxcam_dir / "program.yaml")
 
     pm = ProgramManager(base_dir=programs_dir)

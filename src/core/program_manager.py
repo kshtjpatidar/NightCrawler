@@ -74,6 +74,114 @@ class ProgramManager:
             # Root directory of NightCrawler project
             self.base_dir = Path(__file__).parent.parent.parent / "programs"
 
+    def _get_canonical_base(self, create: bool = False) -> Path:
+        """
+        Resolve the canonical base repository root without swallowing
+        PermissionError, ENOTDIR, or unexpected filesystem errors.
+        """
+        if create and not safe_lexists(self.base_dir):
+            self.base_dir.mkdir(parents=True, exist_ok=True)
+
+        if not safe_lexists(self.base_dir):
+            raise FileNotFoundError(f"Program profile repository path '{self.base_dir}' does not exist.")
+        if not self.base_dir.is_dir():
+            raise ValueError(f"Program profile repository path '{self.base_dir}' is an unexpected filesystem object (expected a directory).")
+        try:
+            return self.base_dir.resolve(strict=True)
+        except (NotADirectoryError, PermissionError):
+            raise
+        except OSError as err:
+            if err.errno == errno.ENOENT:
+                raise FileNotFoundError(f"Program profile repository path '{self.base_dir}' does not exist.")
+            raise
+
+    def _assert_contained(
+        self,
+        candidate_path: Union[str, Path],
+        canonical_base: Optional[Path] = None,
+        item_name: str = "path",
+        allow_missing: bool = False
+    ) -> Path:
+        """
+        Verify that candidate_path resolves strictly within canonical_base.
+        Rejects:
+        - Escaping symlinks (candidate resolves outside canonical_base)
+        - Paths resolving to canonical_base itself (cannot be the root directory)
+        - Broken symlinks if allow_missing is False
+        - Unexpected filesystem errors are propagated, not swallowed.
+        Returns the resolved canonical Path.
+        """
+        base = canonical_base or self._get_canonical_base()
+        p = Path(candidate_path)
+
+        if p.is_symlink():
+            try:
+                resolved = p.resolve(strict=True)
+            except (FileNotFoundError, OSError) as err:
+                if isinstance(err, (NotADirectoryError, PermissionError)):
+                    raise
+                if getattr(err, "errno", None) in (errno.ENOTDIR, errno.EACCES, errno.EPERM):
+                    raise
+                # Broken symlink
+                raise ValueError(f"Program profile {item_name} '{p}' is a broken symlink pointing to a non-existent target.")
+            try:
+                resolved.relative_to(base)
+            except ValueError:
+                raise ValueError(f"Symlink escape detected: {item_name} '{p}' resolves to '{resolved}', which is outside profile repository '{base}'.")
+            if resolved == base:
+                raise ValueError(f"Invalid {item_name} '{p}': resolves to repository root itself.")
+            return resolved
+
+        # Non-symlink path
+        try:
+            resolved = p.resolve(strict=True)
+        except (FileNotFoundError, OSError) as err:
+            if isinstance(err, (NotADirectoryError, PermissionError)):
+                raise
+            if getattr(err, "errno", None) in (errno.ENOTDIR, errno.EACCES, errno.EPERM):
+                raise
+            if allow_missing and (isinstance(err, FileNotFoundError) or getattr(err, "errno", None) == errno.ENOENT):
+                parent_resolved = p.parent.resolve(strict=True)
+                try:
+                    parent_resolved.relative_to(base)
+                except ValueError:
+                    raise ValueError(f"Path escape detected: parent directory of {item_name} '{p}' resolves outside repository root '{base}'.")
+                return parent_resolved / p.name
+            raise
+
+        try:
+            resolved.relative_to(base)
+        except ValueError:
+            raise ValueError(f"Path escape detected: {item_name} '{p}' resolves outside profile repository '{base}'.")
+        if resolved == base:
+            raise ValueError(f"Invalid {item_name} '{p}': resolves to repository root itself.")
+        return resolved
+
+    def _safe_write_yaml(self, profile: ProgramProfile, target_path: Path, canonical_base: Path):
+        """
+        Safely write profile YAML avoiding symlink following and race conditions.
+        Enforces canonical containment of parent directory and uses O_NOFOLLOW.
+        """
+        self._assert_contained(target_path.parent, canonical_base, item_name="target directory")
+        if target_path.is_symlink():
+            raise ValueError(f"Cannot write profile: destination path '{target_path}' is a symlink.")
+
+        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+
+        try:
+            fd = os.open(target_path, flags, 0o644)
+        except OSError as err:
+            if err.errno == errno.ELOOP or getattr(err, "errno", None) == getattr(errno, "EMLINK", None):
+                raise ValueError(f"Symlink escape detected: '{target_path}' is a symlink.")
+            raise
+
+        data = profile.to_dict()
+        yaml_bytes = yaml.dump(data, default_flow_style=False, sort_keys=False).encode("utf-8")
+        with os.fdopen(fd, "wb") as f:
+            f.write(yaml_bytes)
+
     def list_profiles(self) -> List[Dict[str, Any]]:
         """Return summary of all available program profiles."""
         if not safe_lexists(self.base_dir):
@@ -81,10 +189,27 @@ class ProgramManager:
         if not self.base_dir.is_dir():
             raise ValueError(f"Program profile repository path '{self.base_dir}' is not a directory.")
         profiles = []
+        canonical_base = self._get_canonical_base()
         for p_dir in self.base_dir.iterdir():
             if p_dir.is_dir():
-                yaml_file = p_dir / "program.yaml"
-                json_file = p_dir / "program.json"
+                try:
+                    resolved_dir = self._assert_contained(p_dir, canonical_base, item_name=f"profile directory '{p_dir}'")
+                except ValueError as err:
+                    profiles.append({
+                        "id": p_dir.name,
+                        "name": p_dir.name,
+                        "platform": "Unknown",
+                        "max_rps": "N/A",
+                        "allowed_domains": 0,
+                        "valid": False,
+                        "errors": [str(err)],
+                        "requires_review": False,
+                        "path": str(p_dir)
+                    })
+                    continue
+
+                yaml_file = resolved_dir / "program.yaml"
+                json_file = resolved_dir / "program.json"
                 has_y = safe_lexists(yaml_file)
                 has_j = safe_lexists(json_file)
                 if has_y and has_j:
@@ -103,12 +228,13 @@ class ProgramManager:
                 target_file = yaml_file if has_y else (json_file if has_j else None)
                 if target_file:
                     try:
-                        if target_file.is_dir() or (target_file.is_symlink() and not target_file.resolve().is_file()):
+                        resolved_file = self._assert_contained(target_file, canonical_base, item_name=f"profile file '{target_file}'")
+                        if not resolved_file.is_file():
                             raise ValueError(f"Profile file '{target_file}' is an unexpected filesystem object (not a regular file).")
-                        if target_file.suffix == ".yaml":
-                            profile = PolicyParser.from_yaml_file(target_file)
+                        if resolved_file.suffix == ".yaml":
+                            profile = PolicyParser.from_yaml_file(resolved_file)
                         else:
-                            profile = PolicyParser.from_json_file(target_file)
+                            profile = PolicyParser.from_json_file(resolved_file)
                         errors = PolicyValidator.validate(profile)
                         profiles.append({
                             "id": profile.id,
@@ -122,6 +248,8 @@ class ProgramManager:
                             "path": str(target_file)
                         })
                     except Exception as e:
+                        if isinstance(e, (PermissionError, NotADirectoryError)):
+                            raise
                         profiles.append({
                             "id": p_dir.name,
                             "name": p_dir.name,
@@ -152,18 +280,7 @@ class ProgramManager:
         Locate the profile directory or filesystem entry for program_id in base_dir.
         Uses case-insensitive matching and os.lstat to detect symlinks and unusual objects
         without masking PermissionError or unexpected filesystem OSError conditions.
-
-        Missing-directory fallback rule:
-        If self.base_dir is demonstrably absent (does not exist on the filesystem),
-        no profile can be present. Returns None, permitting fallback to base configuration.
-        An inaccessible directory (PermissionError or I/O error) is NOT treated as absent.
-
-        Failure modes:
-        - If self.base_dir is inaccessible (PermissionError or filesystem OSError), propagates error.
-        - If self.base_dir exists but is not a directory, raises ValueError.
-        - If iteration over self.base_dir encounters PermissionError or filesystem OSError, propagates error.
-        - If the profile is demonstrably absent after successful iteration, returns None.
-        - If a matching entry is found, returns the Path to that entry.
+        Enforces canonical containment: rejecting any symlink that escapes base_dir.
         """
         clean_id = validate_program_id(program_id)
 
@@ -171,19 +288,17 @@ class ProgramManager:
         if not safe_lexists(self.base_dir):
             return None
 
-        # Ensure base_dir is actually a directory (or valid symlink to directory)
-        if not self.base_dir.is_dir():
-            raise ValueError(f"Program profile repository path '{self.base_dir}' is an unexpected filesystem object (expected a directory).")
-
-        canonical_base = self.base_dir.resolve()
+        canonical_base = self._get_canonical_base()
         direct = self.base_dir / clean_id
         if safe_lexists(direct):
+            self._assert_contained(direct, canonical_base, item_name=f"profile directory '{direct}'")
             return direct
 
         # 2. Case-insensitive search across directory entries.
         # Do NOT catch PermissionError or unexpected OSError - propagate them!
         for sub in self.base_dir.iterdir():
             if sub.name.lower() == clean_id and safe_lexists(sub):
+                self._assert_contained(sub, canonical_base, item_name=f"profile directory '{sub}'")
                 return sub
 
         return None
@@ -205,6 +320,7 @@ class ProgramManager:
         Failure modes:
         - If genuinely absent according to documented rule, returns None.
         - If the profile path is an unexpected filesystem object (not a directory, broken symlink), raises ValueError.
+        - If the profile path or its files are symlinks escaping the repository, raises ValueError.
         - If the profile directory exists but has no recognized profile file (empty or unexpected files), raises ValueError.
         - If both 'program.yaml' and 'program.json' exist, raises ValueError (ambiguous configuration).
         - If the profile file is not a regular file or is a broken symlink, raises ValueError.
@@ -216,30 +332,14 @@ class ProgramManager:
         if target_path is None:
             return None
 
-        # 1. Inspect target_path itself
-        if target_path.is_symlink():
-            try:
-                resolved_dir = target_path.resolve(strict=True)
-            except FileNotFoundError:
-                raise ValueError(
-                    f"Program profile path '{target_path}' is a broken symlink pointing to a non-existent target."
-                )
-            except OSError as err:
-                if err.errno in (errno.ENOENT, errno.ENOTDIR):
-                    raise ValueError(
-                        f"Program profile path '{target_path}' is a broken symlink pointing to a non-existent target."
-                    )
-                raise
-            if not resolved_dir.is_dir():
-                raise ValueError(
-                    f"Program profile path '{target_path}' resolves to an unexpected filesystem object (not a directory): {resolved_dir}"
-                )
-        elif not target_path.is_dir():
+        canonical_base = self._get_canonical_base()
+
+        # 1. Inspect target_path itself and assert containment
+        resolved_dir = self._assert_contained(target_path, canonical_base, item_name=f"profile directory '{target_path}'")
+        if not resolved_dir.is_dir():
             raise ValueError(
-                f"Program profile path '{target_path}' is an unexpected filesystem object (expected a directory, got {type(target_path).__name__})."
+                f"Program profile path '{target_path}' resolves to an unexpected filesystem object (expected a directory, got {type(target_path).__name__})."
             )
-        else:
-            resolved_dir = target_path
 
         # 2. Inspect profile files within the directory
         yaml_file = resolved_dir / "program.yaml"
@@ -262,34 +362,23 @@ class ProgramManager:
 
         target_file = yaml_file if has_yaml else json_file
 
-        # 3. Inspect target_file itself
-        if target_file.is_symlink():
-            try:
-                resolved_file = target_file.resolve(strict=True)
-            except FileNotFoundError:
-                raise ValueError(f"Profile file '{target_file}' is a broken symlink.")
-            except OSError as err:
-                if err.errno in (errno.ENOENT, errno.ENOTDIR):
-                    raise ValueError(f"Profile file '{target_file}' is a broken symlink.")
-                raise
-            if not resolved_file.is_file():
-                raise ValueError(
-                    f"Profile file '{target_file}' resolves to an unexpected filesystem object (expected regular file): {resolved_file}"
-                )
-        elif not target_file.is_file():
+        # 3. Inspect target_file itself and assert containment
+        resolved_file = self._assert_contained(target_file, canonical_base, item_name=f"profile file '{target_file}'")
+        if not resolved_file.is_file():
             raise ValueError(
-                f"Profile file '{target_file}' is an unexpected filesystem object (expected regular file)."
+                f"Profile file '{target_file}' resolves to an unexpected filesystem object (expected regular file): {resolved_file}"
             )
 
         # 4. Load and parse (preserving unreadable / malformed / policy errors)
-        if target_file.suffix == ".yaml":
-            return PolicyParser.from_yaml_file(target_file)
+        if resolved_file.suffix == ".yaml":
+            return PolicyParser.from_yaml_file(resolved_file)
         else:
-            return PolicyParser.from_json_file(target_file)
+            return PolicyParser.from_json_file(resolved_file)
 
     def validate_profile(self, program_id: str) -> List[str]:
         """Validate a profile by ID."""
-        profile = self.get_profile(program_id)
+        clean_id = validate_program_id(program_id)
+        profile = self.get_profile(clean_id)
         if not profile:
             return [f"Program profile '{program_id}' not found."]
         return PolicyValidator.validate(profile)
@@ -304,21 +393,25 @@ class ProgramManager:
             raise ValueError(f"Invalid profile configuration: {', '.join(errors)}")
 
         if save:
+            canonical_base = self._get_canonical_base(create=True)
             target_dir = self.base_dir / clean_id
+
+            if target_dir.is_symlink():
+                raise ValueError(f"Cannot create profile: target directory '{clean_id}' is a symlink.")
             if safe_lexists(target_dir):
                 raise ValueError(f"Cannot create profile: profile '{clean_id}' already exists in repository.")
-            canonical_base = self.base_dir.resolve()
-            try:
-                target_dir.resolve().relative_to(canonical_base)
-            except ValueError:
-                raise ValueError(f"Path traversal detected in profile ID '{clean_id}'.")
+
+            self._assert_contained(target_dir, canonical_base, item_name=f"target directory '{clean_id}'", allow_missing=True)
+
+            target_dir.mkdir(parents=True, exist_ok=False)
             target_path = target_dir / "program.yaml"
-            profile.save_yaml(target_path)
+            self._safe_write_yaml(profile, target_path, canonical_base)
         return profile
 
     def update_profile(self, program_id: str, updates: Dict[str, Any]) -> ProgramProfile:
         """Update an existing program profile."""
-        current = self.get_profile(program_id)
+        clean_id = validate_program_id(program_id)
+        current = self.get_profile(clean_id)
         if not current:
             raise ValueError(f"Program profile '{program_id}' not found.")
 
@@ -334,12 +427,28 @@ class ProgramManager:
 
         deep_update(current_dict, updates)
         updated_profile = PolicyParser.from_dict(current_dict)
+        updated_clean_id = validate_program_id(updated_profile.id)
+        updated_profile.id = updated_clean_id
+
         errors = PolicyValidator.validate(updated_profile)
         if errors:
             raise ValueError(f"Validation failed after update: {', '.join(errors)}")
 
-        target_path = self.base_dir / updated_profile.id / "program.yaml"
-        updated_profile.save_yaml(target_path)
+        canonical_base = self._get_canonical_base()
+        target_dir = self.base_dir / updated_clean_id
+
+        if target_dir.is_symlink():
+            raise ValueError(f"Cannot update profile: profile directory '{target_dir}' is a symlink.")
+        if not safe_lexists(target_dir) or not target_dir.is_dir():
+            raise ValueError(f"Cannot update profile: target directory '{target_dir}' does not exist or is not a directory.")
+
+        self._assert_contained(target_dir, canonical_base, item_name=f"target directory '{target_dir}'")
+
+        target_path = target_dir / "program.yaml"
+        if target_path.is_symlink():
+            raise ValueError(f"Cannot update profile: target file '{target_path}' is a symlink.")
+
+        self._safe_write_yaml(updated_profile, target_path, canonical_base)
         return updated_profile
 
     def import_profile(self, source_path_or_str: str, format_hint: str = "auto") -> ProgramProfile:
@@ -374,33 +483,32 @@ class ProgramManager:
             else:
                 profile = PolicyParser.from_text_rules("imported-program", "Imported Program", content)
 
-        # 1. Validate profile ID strictly
         clean_id = validate_program_id(profile.id)
         profile.id = clean_id
 
-        # 2. Validate policy before writing anything to disk
         errors = PolicyValidator.validate(profile)
         if errors:
             raise ValueError(f"Invalid profile configuration in import: {', '.join(errors)}")
 
+        canonical_base = self._get_canonical_base(create=True)
         target_dir = self.base_dir / clean_id
+
+        if target_dir.is_symlink():
+            raise ValueError(f"Cannot import profile: target directory '{clean_id}' is a symlink.")
         if safe_lexists(target_dir):
             raise ValueError(f"Cannot import profile: profile '{clean_id}' already exists in repository.")
 
-        canonical_base = self.base_dir.resolve()
-        try:
-            target_dir.resolve().relative_to(canonical_base)
-        except ValueError:
-            raise ValueError(f"Path traversal detected in profile ID '{clean_id}'.")
+        self._assert_contained(target_dir, canonical_base, item_name=f"target directory '{clean_id}'", allow_missing=True)
 
-        # Save imported profile
+        target_dir.mkdir(parents=True, exist_ok=False)
         target_path = target_dir / "program.yaml"
-        profile.save_yaml(target_path)
+        self._safe_write_yaml(profile, target_path, canonical_base)
         return profile
 
     def export_profile(self, program_id: str, output_path: str, export_format: str = "yaml") -> Path:
         """Export a profile to the specified output file in YAML or JSON."""
-        profile = self.get_profile(program_id)
+        clean_id = validate_program_id(program_id)
+        profile = self.get_profile(clean_id)
         if not profile:
             raise ValueError(f"Program profile '{program_id}' not found.")
 
@@ -418,30 +526,31 @@ class ProgramManager:
     def duplicate_profile(self, source_id: str, new_id: str, new_name: Optional[str] = None) -> ProgramProfile:
         """Duplicate an existing profile under a new ID and name."""
         clean_new_id = validate_program_id(new_id)
-        source = self.get_profile(source_id)
+        clean_source_id = validate_program_id(source_id)
+        source = self.get_profile(clean_source_id)
         if not source:
             raise ValueError(f"Source program profile '{source_id}' not found.")
 
+        canonical_base = self._get_canonical_base(create=True)
         target_dir = self.base_dir / clean_new_id
+
+        if target_dir.is_symlink():
+            raise ValueError(f"Cannot duplicate profile: target directory '{clean_new_id}' is a symlink.")
         if safe_lexists(target_dir):
             raise ValueError(f"Cannot duplicate profile: target profile directory '{clean_new_id}' already exists.")
 
-        canonical_base = self.base_dir.resolve()
-        try:
-            target_dir.resolve().relative_to(canonical_base)
-        except ValueError:
-            raise ValueError(f"Path traversal detected: target directory '{clean_new_id}' escapes base directory.")
+        self._assert_contained(target_dir, canonical_base, item_name=f"target directory '{clean_new_id}'", allow_missing=True)
 
         data = source.to_dict()
         data["id"] = clean_new_id
         data["name"] = new_name or f"{source.name} (Copy)"
         new_profile = PolicyParser.from_dict(data)
 
-        # Validate policy before saving
         errors = PolicyValidator.validate(new_profile)
         if errors:
             raise ValueError(f"Validation failed for duplicated profile: {', '.join(errors)}")
 
+        target_dir.mkdir(parents=True, exist_ok=False)
         target_path = target_dir / "program.yaml"
-        new_profile.save_yaml(target_path)
+        self._safe_write_yaml(new_profile, target_path, canonical_base)
         return new_profile
