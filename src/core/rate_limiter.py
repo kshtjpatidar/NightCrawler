@@ -16,6 +16,10 @@ class GlobalRateLimiter:
     """
 
     def __init__(self, max_requests_per_second: float = 5.0, burst: Optional[int] = None):
+        if isinstance(max_requests_per_second, bool) or not isinstance(max_requests_per_second, (int, float)):
+            raise TypeError(f"max_requests_per_second must be numeric, got {type(max_requests_per_second).__name__}: {max_requests_per_second}")
+        if burst is not None and (isinstance(burst, bool) or not isinstance(burst, int)):
+            raise TypeError(f"burst must be an integer, got {type(burst).__name__}: {burst}")
         if max_requests_per_second <= 0:
             raise ValueError(f"max_requests_per_second must be positive (> 0), got {max_requests_per_second}")
         self.rate = float(max_requests_per_second)

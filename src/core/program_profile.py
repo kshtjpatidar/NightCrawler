@@ -383,9 +383,9 @@ class ProgramProfile:
             yaml.dump(data, f, default_flow_style=False, sort_keys=False)
 
     @classmethod
-    def from_dict(cls, data: Dict[str, Any], source_ref: str = "", strict_numeric: bool = True) -> "ProgramProfile":
+    def from_dict(cls, data: Dict[str, Any], source_ref: str = "") -> "ProgramProfile":
         """Convenience method delegating to PolicyParser.from_dict."""
-        return PolicyParser.from_dict(data, source_ref=source_ref, strict_numeric=strict_numeric)
+        return PolicyParser.from_dict(data, source_ref=source_ref)
 
 
 class PolicyParser:
@@ -400,7 +400,7 @@ class PolicyParser:
         return re.sub(r'\$\{([A-Za-z0-9_]+)\}|\$([A-Za-z0-9_]+)', repl, text)
 
     @classmethod
-    def from_dict(cls, data: Dict[str, Any], source_ref: str = "", strict_numeric: bool = True) -> ProgramProfile:
+    def from_dict(cls, data: Dict[str, Any], source_ref: str = "") -> ProgramProfile:
         """Instantiate ProgramProfile from dictionary."""
         if not isinstance(data, dict):
             raise ValueError(f"Program profile data must be a dictionary, got {type(data).__name__}")
@@ -447,7 +447,7 @@ class PolicyParser:
             excluded_paths=[p.strip() for p in scope_raw.get("excluded_paths", []) if p.strip()],
             allowed_protocols=[pr.lower().strip() for pr in scope_raw.get("allowed_protocols", ["http", "https"])],
             allowed_ports=[
-                validate_profile_int(p, "scope.allowed_ports", min_val=1, max_val=65535, context=f"profile '{p_id}'") if strict_numeric else int(p)
+                validate_profile_int(p, "scope.allowed_ports", min_val=1, max_val=65535, context=f"profile '{p_id}'")
                 for p in scope_raw.get("allowed_ports", [80, 443, 8080, 8443])
             ],
             third_party_hosted_exclusions=[h.strip() for h in scope_raw.get("third_party_hosted_exclusions", []) if h.strip()]
@@ -465,25 +465,25 @@ class PolicyParser:
             raise ValueError(f"Unknown key(s) in profile request_policy: {sorted(unknown_rp)}.")
 
         max_rps_val = rp_raw.get("max_rps", 5.0)
-        max_rps = validate_profile_float(max_rps_val, "request_policy.max_rps", context=f"profile '{p_id}'") if strict_numeric else float(max_rps_val)
+        max_rps = validate_profile_float(max_rps_val, "request_policy.max_rps", context=f"profile '{p_id}'")
 
         concurrency_val = rp_raw.get("concurrency", 1)
-        concurrency = validate_profile_int(concurrency_val, "request_policy.concurrency", min_val=1, context=f"profile '{p_id}'") if strict_numeric else int(concurrency_val)
+        concurrency = validate_profile_int(concurrency_val, "request_policy.concurrency", min_val=1, context=f"profile '{p_id}'")
 
         timeout_val = rp_raw.get("timeout", 30)
-        timeout = validate_profile_int(timeout_val, "request_policy.timeout", min_val=1, context=f"profile '{p_id}'") if strict_numeric else int(timeout_val)
+        timeout = validate_profile_int(timeout_val, "request_policy.timeout", min_val=1, context=f"profile '{p_id}'")
 
         crawl_depth_val = rp_raw.get("crawl_depth", 1)
-        crawl_depth = validate_profile_int(crawl_depth_val, "request_policy.crawl_depth", min_val=1, context=f"profile '{p_id}'") if strict_numeric else int(crawl_depth_val)
+        crawl_depth = validate_profile_int(crawl_depth_val, "request_policy.crawl_depth", min_val=1, context=f"profile '{p_id}'")
 
         per_host_rps_val = rp_raw.get("per_host_rps", max_rps)
-        per_host_rps = validate_profile_float(per_host_rps_val, "request_policy.per_host_rps", context=f"profile '{p_id}'") if strict_numeric else float(per_host_rps_val)
+        per_host_rps = validate_profile_float(per_host_rps_val, "request_policy.per_host_rps", context=f"profile '{p_id}'")
 
         max_retries_val = rp_raw.get("max_retries", 2)
-        max_retries = validate_profile_int(max_retries_val, "request_policy.max_retries", min_val=0, context=f"profile '{p_id}'") if strict_numeric else int(max_retries_val)
+        max_retries = validate_profile_int(max_retries_val, "request_policy.max_retries", min_val=0, context=f"profile '{p_id}'")
 
         burst_val = rp_raw.get("burst", 1)
-        burst = validate_profile_int(burst_val, "request_policy.burst", min_val=1, context=f"profile '{p_id}'") if strict_numeric else int(burst_val)
+        burst = validate_profile_int(burst_val, "request_policy.burst", min_val=1, context=f"profile '{p_id}'")
 
         request_policy = RequestPolicyDefinition(
             max_rps=max_rps,

@@ -130,6 +130,10 @@ def main(ctx, target, target_list, urls, output, concurrency, depth, timeout,
             click.echo(click.style(f"\n[!] ERROR: Program profile '{program}' not found in programs/ directory!", fg='red', bold=True))
             click.echo(click.style(f"    Available programs: {', '.join([p['id'] for p in pm.list_profiles()])}\n", fg='yellow'))
             sys.exit(1)
+        errors = PolicyValidator.validate(active_profile)
+        if errors:
+            click.echo(click.style(f"\n[!] POLICY ERROR: Program profile '{program}' failed validation: {'; '.join(errors)}\n", fg='red', bold=True))
+            sys.exit(1)
     else:
         # Check if default program profile exists on disk
         default_program = "uxcam"

@@ -629,3 +629,331 @@ def test_default_profile_errors_do_not_leak_canary_secrets():
         assert canary_secret not in result.output, "Canary secret token was leaked in startup error output!"
         assert mock_scanner.call_count == 0
 
+
+# ============================================================================
+# SECTION 5: MULTI-PATH PROFILE INGESTION STRICT NUMERIC TESTS
+# ============================================================================
+
+@pytest.mark.parametrize("bad_val", [
+    True, False, 2.5, "10", 0, -1, float("nan"), float("inf"), 10**1000
+])
+def test_all_profile_ingestion_paths_reject_invalid_concurrency(tmp_path, bad_val):
+    """Verify that every supported profile ingestion path unconditionally rejects invalid concurrency values."""
+    from src.core.program_profile import PolicyParser
+    pm = ProgramManager(base_dir=tmp_path / "programs")
+
+    raw_dict = {
+        "id": "test-p",
+        "name": "Test",
+        "scope": {"allowed_domains": ["test.com"]},
+        "request_policy": {"concurrency": bad_val}
+    }
+    # 1. ProgramProfile.from_dict
+    with pytest.raises((ValueError, TypeError, PolicyValidationError)):
+        ProgramProfile.from_dict(raw_dict)
+
+    # 2. PolicyParser.from_dict
+    with pytest.raises((ValueError, TypeError, PolicyValidationError)):
+        PolicyParser.from_dict(raw_dict)
+
+    # 3. PolicyParser.from_yaml_file
+    y_file = tmp_path / "test.yaml"
+    import yaml
+    with open(y_file, "w") as f:
+        yaml.dump(raw_dict, f)
+    with pytest.raises((ValueError, TypeError, PolicyValidationError)):
+        PolicyParser.from_yaml_file(y_file)
+
+    # 4. PolicyParser.from_json_file
+    j_file = tmp_path / "test.json"
+    import json
+    try:
+        with open(j_file, "w") as f:
+            json.dump(raw_dict, f)
+        with pytest.raises((ValueError, TypeError, PolicyValidationError)):
+            PolicyParser.from_json_file(j_file)
+    except (ValueError, OverflowError):
+        pass
+
+    # 5. ProgramManager.create_profile
+    with pytest.raises((ValueError, TypeError, PolicyValidationError)):
+        pm.create_profile(raw_dict, save=False)
+
+
+@pytest.mark.parametrize("bad_rps", [
+    True, False, "5.0", 0.0, -1.0, float("nan"), float("inf"), 10**1000
+])
+def test_all_profile_ingestion_paths_reject_invalid_max_rps(tmp_path, bad_rps):
+    """Verify that every supported profile ingestion path unconditionally rejects invalid max_rps values."""
+    from src.core.program_profile import PolicyParser
+    pm = ProgramManager(base_dir=tmp_path / "programs")
+
+    raw_dict = {
+        "id": "test-p",
+        "name": "Test",
+        "scope": {"allowed_domains": ["test.com"]},
+        "request_policy": {"max_rps": bad_rps}
+    }
+    with pytest.raises((ValueError, TypeError, PolicyValidationError)):
+        ProgramProfile.from_dict(raw_dict)
+
+    with pytest.raises((ValueError, TypeError, PolicyValidationError)):
+        PolicyParser.from_dict(raw_dict)
+
+    y_file = tmp_path / "test_rps.yaml"
+    import yaml
+    with open(y_file, "w") as f:
+        yaml.dump(raw_dict, f)
+    with pytest.raises((ValueError, TypeError, PolicyValidationError)):
+        PolicyParser.from_yaml_file(y_file)
+
+    with pytest.raises((ValueError, TypeError, PolicyValidationError)):
+        pm.create_profile(raw_dict, save=False)
+
+
+# ============================================================================
+# SECTION 6: REAL FILESYSTEM & BROKEN INSTALLATION STARTUP SAFETY TESTS
+# ============================================================================
+
+def test_default_profile_empty_directory_fails_closed_before_network(tmp_path):
+    """Verify empty default profile directory is not misclassified as absent, and fails closed with non-zero exit."""
+    programs_dir = tmp_path / "programs"
+    (programs_dir / "uxcam").mkdir(parents=True)
+
+    runner = CliRunner()
+    with patch("main.ProgramManager", lambda base_dir=None: ProgramManager(base_dir=programs_dir)), \
+         patch("src.core.scanner.NightCrawlerScanner.__init__") as mock_scanner, \
+         patch("aiohttp.ClientSession.__init__") as mock_session, \
+         patch("aiohttp.TCPConnector.__init__") as mock_conn, \
+         patch("subprocess.Popen") as mock_popen:
+
+        result = runner.invoke(main, ["-t", "uxcam.com", "--no-prompt"])
+
+        assert result.exit_code != 0
+        assert "contains no recognized profile file" in result.output.lower() or "failed to load default program profile" in result.output.lower()
+        assert mock_scanner.call_count == 0
+        assert mock_session.call_count == 0
+        assert mock_conn.call_count == 0
+        assert mock_popen.call_count == 0
+
+
+def test_default_profile_unexpected_filenames_fails_closed_before_network(tmp_path):
+    """Verify default profile directory with only unexpected files fails closed with non-zero exit."""
+    programs_dir = tmp_path / "programs"
+    uxcam_dir = programs_dir / "uxcam"
+    uxcam_dir.mkdir(parents=True)
+    (uxcam_dir / "notes.txt").write_text("Not a profile")
+    (uxcam_dir / "settings.ini").write_text("[section]\nfoo=bar")
+
+    runner = CliRunner()
+    with patch("main.ProgramManager", lambda base_dir=None: ProgramManager(base_dir=programs_dir)), \
+         patch("src.core.scanner.NightCrawlerScanner.__init__") as mock_scanner, \
+         patch("aiohttp.ClientSession.__init__") as mock_session, \
+         patch("aiohttp.TCPConnector.__init__") as mock_conn, \
+         patch("subprocess.Popen") as mock_popen:
+
+        result = runner.invoke(main, ["-t", "uxcam.com", "--no-prompt"])
+
+        assert result.exit_code != 0
+        assert "contains no recognized profile file" in result.output.lower() or "failed to load default program profile" in result.output.lower()
+        assert mock_scanner.call_count == 0
+        assert mock_session.call_count == 0
+        assert mock_conn.call_count == 0
+        assert mock_popen.call_count == 0
+
+
+def test_default_profile_both_yaml_and_json_fails_closed_before_network(tmp_path):
+    """Verify presence of both program.yaml and program.json triggers deterministic ambiguous-profile error."""
+    programs_dir = tmp_path / "programs"
+    uxcam_dir = programs_dir / "uxcam"
+    uxcam_dir.mkdir(parents=True)
+    (uxcam_dir / "program.yaml").write_text("id: uxcam\nname: UXCam\nscope:\n  allowed_domains: [uxcam.com]\n")
+    (uxcam_dir / "program.json").write_text('{"id": "uxcam", "name": "UXCam", "scope": {"allowed_domains": ["uxcam.com"]}}')
+
+    runner = CliRunner()
+    with patch("main.ProgramManager", lambda base_dir=None: ProgramManager(base_dir=programs_dir)), \
+         patch("src.core.scanner.NightCrawlerScanner.__init__") as mock_scanner, \
+         patch("aiohttp.ClientSession.__init__") as mock_session, \
+         patch("aiohttp.TCPConnector.__init__") as mock_conn, \
+         patch("subprocess.Popen") as mock_popen:
+
+        result = runner.invoke(main, ["-t", "uxcam.com", "--no-prompt"])
+
+        assert result.exit_code != 0
+        assert "ambiguous profile configuration" in result.output.lower()
+        assert mock_scanner.call_count == 0
+        assert mock_session.call_count == 0
+        assert mock_conn.call_count == 0
+        assert mock_popen.call_count == 0
+
+
+def test_default_profile_unexpected_filesystem_object_file_fails_closed(tmp_path):
+    """Verify regular file at programs/uxcam triggers unexpected filesystem object error and fails closed."""
+    programs_dir = tmp_path / "programs"
+    programs_dir.mkdir(parents=True)
+    (programs_dir / "uxcam").write_text("I am a regular file, not a directory")
+
+    runner = CliRunner()
+    with patch("main.ProgramManager", lambda base_dir=None: ProgramManager(base_dir=programs_dir)), \
+         patch("src.core.scanner.NightCrawlerScanner.__init__") as mock_scanner, \
+         patch("aiohttp.ClientSession.__init__") as mock_session, \
+         patch("aiohttp.TCPConnector.__init__") as mock_conn, \
+         patch("subprocess.Popen") as mock_popen:
+
+        result = runner.invoke(main, ["-t", "uxcam.com", "--no-prompt"])
+
+        assert result.exit_code != 0
+        assert "unexpected filesystem object" in result.output.lower() or "failed to load default program profile" in result.output.lower()
+        assert mock_scanner.call_count == 0
+        assert mock_session.call_count == 0
+        assert mock_conn.call_count == 0
+        assert mock_popen.call_count == 0
+
+
+def test_default_profile_broken_symlink_directory_fails_closed(tmp_path):
+    """Verify broken symlink at programs/uxcam is not misclassified as absent and fails closed."""
+    programs_dir = tmp_path / "programs"
+    programs_dir.mkdir(parents=True)
+    sym_path = programs_dir / "uxcam"
+    os.symlink("/nonexistent/target/path/uxcam_profile", sym_path)
+
+    runner = CliRunner()
+    with patch("main.ProgramManager", lambda base_dir=None: ProgramManager(base_dir=programs_dir)), \
+         patch("src.core.scanner.NightCrawlerScanner.__init__") as mock_scanner, \
+         patch("aiohttp.ClientSession.__init__") as mock_session, \
+         patch("aiohttp.TCPConnector.__init__") as mock_conn, \
+         patch("subprocess.Popen") as mock_popen:
+
+        result = runner.invoke(main, ["-t", "uxcam.com", "--no-prompt"])
+
+        assert result.exit_code != 0
+        assert "broken symlink" in result.output.lower() or "failed to load default program profile" in result.output.lower()
+        assert mock_scanner.call_count == 0
+        assert mock_session.call_count == 0
+        assert mock_conn.call_count == 0
+        assert mock_popen.call_count == 0
+
+
+def test_default_profile_profile_file_is_directory_fails_closed(tmp_path):
+    """Verify directory named program.yaml inside profile directory triggers unexpected filesystem object error."""
+    programs_dir = tmp_path / "programs"
+    dir_as_file = programs_dir / "uxcam" / "program.yaml"
+    dir_as_file.mkdir(parents=True)
+
+    runner = CliRunner()
+    with patch("main.ProgramManager", lambda base_dir=None: ProgramManager(base_dir=programs_dir)), \
+         patch("src.core.scanner.NightCrawlerScanner.__init__") as mock_scanner, \
+         patch("aiohttp.ClientSession.__init__") as mock_session, \
+         patch("aiohttp.TCPConnector.__init__") as mock_conn, \
+         patch("subprocess.Popen") as mock_popen:
+
+        result = runner.invoke(main, ["-t", "uxcam.com", "--no-prompt"])
+
+        assert result.exit_code != 0
+        assert "unexpected filesystem object" in result.output.lower() or "failed to load default program profile" in result.output.lower()
+        assert mock_scanner.call_count == 0
+        assert mock_session.call_count == 0
+        assert mock_conn.call_count == 0
+        assert mock_popen.call_count == 0
+
+
+def test_default_profile_profile_file_is_broken_symlink_fails_closed(tmp_path):
+    """Verify broken symlink program.yaml triggers broken symlink error and fails closed."""
+    programs_dir = tmp_path / "programs"
+    uxcam_dir = programs_dir / "uxcam"
+    uxcam_dir.mkdir(parents=True)
+    os.symlink("/nonexistent/target/file.yaml", uxcam_dir / "program.yaml")
+
+    runner = CliRunner()
+    with patch("main.ProgramManager", lambda base_dir=None: ProgramManager(base_dir=programs_dir)), \
+         patch("src.core.scanner.NightCrawlerScanner.__init__") as mock_scanner, \
+         patch("aiohttp.ClientSession.__init__") as mock_session, \
+         patch("aiohttp.TCPConnector.__init__") as mock_conn, \
+         patch("subprocess.Popen") as mock_popen:
+
+        result = runner.invoke(main, ["-t", "uxcam.com", "--no-prompt"])
+
+        assert result.exit_code != 0
+        assert "broken symlink" in result.output.lower() or "failed to load default program profile" in result.output.lower()
+        assert mock_scanner.call_count == 0
+        assert mock_session.call_count == 0
+        assert mock_conn.call_count == 0
+        assert mock_popen.call_count == 0
+
+
+def test_default_profile_valid_symlink_directory_loads_successfully(tmp_path):
+    """Verify valid symlink to profile directory loads and validates successfully."""
+    real_dir = tmp_path / "real_uxcam"
+    real_dir.mkdir(parents=True)
+    (real_dir / "program.yaml").write_text("id: uxcam\nname: UXCam\nscope:\n  allowed_domains: [uxcam.com]\nrequest_policy:\n  max_rps: 5.0\n")
+
+    programs_dir = tmp_path / "programs"
+    programs_dir.mkdir(parents=True)
+    os.symlink(real_dir, programs_dir / "uxcam")
+
+    pm = ProgramManager(base_dir=programs_dir)
+    assert pm.profile_exists("uxcam") is True
+    prof = pm.get_profile("uxcam")
+    assert prof is not None
+    assert prof.id == "uxcam"
+    assert prof.request_policy.max_rps == 5.0
+
+
+def test_default_profile_valid_symlink_file_loads_successfully(tmp_path):
+    """Verify valid symlink to program.yaml loads and validates successfully."""
+    real_yaml = tmp_path / "real.yaml"
+    real_yaml.write_text("id: uxcam\nname: UXCam\nscope:\n  allowed_domains: [uxcam.com]\nrequest_policy:\n  max_rps: 5.0\n")
+
+    programs_dir = tmp_path / "programs"
+    uxcam_dir = programs_dir / "uxcam"
+    uxcam_dir.mkdir(parents=True)
+    os.symlink(real_yaml, uxcam_dir / "program.yaml")
+
+    pm = ProgramManager(base_dir=programs_dir)
+    assert pm.profile_exists("uxcam") is True
+    prof = pm.get_profile("uxcam")
+    assert prof is not None
+    assert prof.id == "uxcam"
+    assert prof.request_policy.max_rps == 5.0
+
+
+def test_default_profile_genuinely_absent_fallback_independently_validated(tmp_path):
+    """
+    Verify that when default profile is genuinely absent according to documented rule:
+    1. profile_exists returns False.
+    2. get_profile returns None.
+    3. main falls back to base config.
+    4. base config is independently validated before any network initialization.
+    """
+    programs_dir = tmp_path / "programs"
+    programs_dir.mkdir(parents=True)
+    # Genuinely absent: no uxcam directory or file
+
+    pm = ProgramManager(base_dir=programs_dir)
+    assert pm.profile_exists("uxcam") is False
+    assert pm.get_profile("uxcam") is None
+
+    runner = CliRunner()
+    # Scenario A: Valid base configuration proceeds
+    with patch("main.ProgramManager", lambda base_dir=None: pm), \
+         patch("src.core.scanner.NightCrawlerScanner.__init__", return_value=None) as mock_scanner, \
+         patch("asyncio.run", return_value=None):
+
+        result = runner.invoke(main, ["-t", "uxcam.com", "--no-prompt", "--header-value", "researcher@example.com"])
+        assert "failed to load default program profile" not in result.output.lower()
+        assert mock_scanner.call_count == 1
+
+    # Scenario B: Invalid base configuration (e.g. max_rps <= 0) fails closed before any network initialization
+    with patch("main.ProgramManager", lambda base_dir=None: pm), \
+         patch("src.core.scanner.NightCrawlerScanner.__init__") as mock_scanner, \
+         patch("aiohttp.ClientSession.__init__") as mock_session, \
+         patch("aiohttp.TCPConnector.__init__") as mock_conn, \
+         patch("subprocess.Popen") as mock_popen:
+
+        result = runner.invoke(main, ["-t", "uxcam.com", "--no-prompt", "--header-value", "researcher@example.com", "--max-rps", "-1.0"])
+        assert result.exit_code != 0
+        assert mock_scanner.call_count == 0
+        assert mock_session.call_count == 0
+        assert mock_conn.call_count == 0
+        assert mock_popen.call_count == 0
+

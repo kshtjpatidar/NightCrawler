@@ -3,6 +3,7 @@ NightCrawler - Program Manager Module
 Handles lifecycle management, discovery, and manipulation of bug bounty program profiles.
 """
 
+import os
 import shutil
 import json
 from pathlib import Path
@@ -30,9 +31,26 @@ class ProgramManager:
             if p_dir.is_dir():
                 yaml_file = p_dir / "program.yaml"
                 json_file = p_dir / "program.json"
-                target_file = yaml_file if yaml_file.exists() else (json_file if json_file.exists() else None)
+                has_y = os.path.lexists(yaml_file)
+                has_j = os.path.lexists(json_file)
+                if has_y and has_j:
+                    profiles.append({
+                        "id": p_dir.name,
+                        "name": p_dir.name,
+                        "platform": "Unknown",
+                        "max_rps": "N/A",
+                        "allowed_domains": 0,
+                        "valid": False,
+                        "errors": ["Ambiguous profile configuration: both 'program.yaml' and 'program.json' exist."],
+                        "requires_review": False,
+                        "path": str(p_dir)
+                    })
+                    continue
+                target_file = yaml_file if has_y else (json_file if has_j else None)
                 if target_file:
                     try:
+                        if target_file.is_dir() or (target_file.is_symlink() and not target_file.resolve().is_file()):
+                            raise ValueError(f"Profile file '{target_file}' is an unexpected filesystem object (not a regular file).")
                         if target_file.suffix == ".yaml":
                             profile = PolicyParser.from_yaml_file(target_file)
                         else:
@@ -61,50 +79,123 @@ class ProgramManager:
                             "requires_review": False,
                             "path": str(target_file or p_dir)
                         })
+                else:
+                    profiles.append({
+                        "id": p_dir.name,
+                        "name": p_dir.name,
+                        "platform": "Unknown",
+                        "max_rps": "N/A",
+                        "allowed_domains": 0,
+                        "valid": False,
+                        "errors": ["Profile directory exists but contains no recognized profile file ('program.yaml' or 'program.json')."],
+                        "requires_review": False,
+                        "path": str(p_dir)
+                    })
         return sorted(profiles, key=lambda x: x["id"])
 
-    def profile_exists(self, program_id: str) -> bool:
-        """Check if a program profile file or directory exists on disk."""
+    def find_profile_path(self, program_id: str) -> Optional[Path]:
+        """
+        Locate the profile directory or filesystem entry for program_id in base_dir.
+        Uses case-insensitive matching and os.path.lexists to detect symlinks and unusual objects.
+        Returns None if and only if the profile is genuinely absent according to documented rule:
+        no directory, regular file, symlink, or other filesystem object matching program_id
+        exists in base_dir.
+        """
         clean_id = program_id.strip().lower()
-        prog_dir = self.base_dir / clean_id
-        if prog_dir.exists():
-            if (prog_dir / "program.yaml").exists() or (prog_dir / "program.json").exists():
-                return True
-        for sub in self.base_dir.iterdir():
-            if sub.is_dir() and sub.name.lower() == clean_id:
-                if (sub / "program.yaml").exists() or (sub / "program.json").exists():
-                    return True
-        return False
+        direct = self.base_dir / clean_id
+        if os.path.lexists(direct):
+            return direct
+        try:
+            for sub in self.base_dir.iterdir():
+                if sub.name.lower() == clean_id and os.path.lexists(sub):
+                    return sub
+        except (OSError, PermissionError):
+            pass
+        return None
+
+    def profile_exists(self, program_id: str) -> bool:
+        """
+        Check if a program profile directory or filesystem entry exists on disk.
+        Returns False ONLY when the profile is genuinely absent according to documented rule:
+        no directory, file, symlink, or filesystem entry matching program_id exists in base_dir.
+        Returns True if any matching filesystem entry exists.
+        """
+        return self.find_profile_path(program_id) is not None
 
     def get_profile(self, program_id: str) -> Optional[ProgramProfile]:
-        """Load and return a program profile by ID or directory name."""
-        clean_id = program_id.strip().lower()
-        prog_dir = self.base_dir / clean_id
-        target_file = None
+        """
+        Load and return a program profile by ID or directory name.
 
-        if prog_dir.exists():
-            y_file = prog_dir / "program.yaml"
-            j_file = prog_dir / "program.json"
-            if y_file.exists():
-                target_file = y_file
-            elif j_file.exists():
-                target_file = j_file
-
-        if target_file is None:
-            # Try searching by id match across all profiles
-            for sub in self.base_dir.iterdir():
-                if sub.is_dir():
-                    y_file = sub / "program.yaml"
-                    j_file = sub / "program.json"
-                    f = y_file if y_file.exists() else (j_file if j_file.exists() else None)
-                    if f and sub.name.lower() == clean_id:
-                        target_file = f
-                        break
-
-        if target_file is None:
+        Failure modes:
+        - If genuinely absent according to documented rule, returns None.
+        - If the profile path is an unexpected filesystem object (not a directory, broken symlink), raises ValueError.
+        - If the profile directory exists but has no recognized profile file (empty or unexpected files), raises ValueError.
+        - If both 'program.yaml' and 'program.json' exist, raises ValueError (ambiguous configuration).
+        - If the profile file is not a regular file or is a broken symlink, raises ValueError.
+        - If the profile file is unreadable (PermissionError), raises PermissionError.
+        - If the profile file is malformed YAML/JSON, raises parsing exception.
+        - If the profile file contains invalid policy fields, raises PolicyValidationError.
+        """
+        target_path = self.find_profile_path(program_id)
+        if target_path is None:
             return None
 
-        # Do not swallow exceptions: malformed YAML, PermissionError, PolicyValidationError raise directly
+        # 1. Inspect target_path itself
+        if target_path.is_symlink():
+            try:
+                resolved_dir = target_path.resolve(strict=True)
+            except (OSError, FileNotFoundError):
+                raise ValueError(
+                    f"Program profile path '{target_path}' is a broken symlink pointing to a non-existent target."
+                )
+            if not resolved_dir.is_dir():
+                raise ValueError(
+                    f"Program profile path '{target_path}' resolves to an unexpected filesystem object (not a directory): {resolved_dir}"
+                )
+        elif not target_path.is_dir():
+            raise ValueError(
+                f"Program profile path '{target_path}' is an unexpected filesystem object (expected a directory, got {type(target_path).__name__})."
+            )
+        else:
+            resolved_dir = target_path
+
+        # 2. Inspect profile files within the directory
+        yaml_file = resolved_dir / "program.yaml"
+        json_file = resolved_dir / "program.json"
+
+        has_yaml = os.path.lexists(yaml_file)
+        has_json = os.path.lexists(json_file)
+
+        if has_yaml and has_json:
+            raise ValueError(
+                f"Ambiguous profile configuration in '{resolved_dir}': both 'program.yaml' and 'program.json' exist. "
+                f"Exactly one profile configuration file must be present."
+            )
+
+        if not has_yaml and not has_json:
+            raise ValueError(
+                f"Program profile directory '{resolved_dir}' exists but contains no recognized profile file "
+                f"('program.yaml' or 'program.json')."
+            )
+
+        target_file = yaml_file if has_yaml else json_file
+
+        # 3. Inspect target_file itself
+        if target_file.is_symlink():
+            try:
+                resolved_file = target_file.resolve(strict=True)
+            except (OSError, FileNotFoundError):
+                raise ValueError(f"Profile file '{target_file}' is a broken symlink.")
+            if not resolved_file.is_file():
+                raise ValueError(
+                    f"Profile file '{target_file}' resolves to an unexpected filesystem object (expected regular file): {resolved_file}"
+                )
+        elif not target_file.is_file():
+            raise ValueError(
+                f"Profile file '{target_file}' is an unexpected filesystem object (expected regular file)."
+            )
+
+        # 4. Load and parse (preserving unreadable / malformed / policy errors)
         if target_file.suffix == ".yaml":
             return PolicyParser.from_yaml_file(target_file)
         else:

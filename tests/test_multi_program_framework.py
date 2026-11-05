@@ -22,7 +22,7 @@ from click.testing import CliRunner
 
 from main import main
 from src.core.program_manager import ProgramManager
-from src.core.program_profile import ProgramProfile, PolicyParser, PolicyValidator
+from src.core.program_profile import ProgramProfile, PolicyParser, PolicyValidator, ScopeDefinition, RequestPolicyDefinition
 from src.core.scope import ScopeManager
 from src.core.request_policy import RequestPolicyManager
 from src.core.auth_manager import AuthenticationManager
@@ -72,23 +72,23 @@ def test_program_validation_rules():
             "request_policy": {"max_rps": float("nan")}
         })
 
-    # 1. Non-positive RPS rejected by PolicyValidator
-    p1 = PolicyParser.from_dict({
-        "id": "bad-rps",
-        "name": "Bad RPS",
-        "scope": {"allowed_domains": ["test.com"]},
-        "request_policy": {"max_rps": 0}
-    }, strict_numeric=False)
+    # 1. Non-positive RPS rejected by PolicyValidator (constructed via test-only direct dataclass)
+    p1 = ProgramProfile(
+        id="bad-rps",
+        name="Bad RPS",
+        scope=ScopeDefinition(allowed_domains=["test.com"]),
+        request_policy=RequestPolicyDefinition(max_rps=0.0)
+    )
     errors = PolicyValidator.validate(p1)
     assert any("max_rps must be positive" in e for e in errors)
 
-    # 2. NaN / Inf RPS rejected by PolicyValidator
-    p2 = PolicyParser.from_dict({
-        "id": "nan-rps",
-        "name": "NaN RPS",
-        "scope": {"allowed_domains": ["test.com"]},
-        "request_policy": {"max_rps": float("nan")}
-    }, strict_numeric=False)
+    # 2. NaN / Inf RPS rejected by PolicyValidator (constructed via test-only direct dataclass)
+    p2 = ProgramProfile(
+        id="nan-rps",
+        name="NaN RPS",
+        scope=ScopeDefinition(allowed_domains=["test.com"]),
+        request_policy=RequestPolicyDefinition(max_rps=float("nan"))
+    )
     errors = PolicyValidator.validate(p2)
     assert any("NaN or Infinity" in e for e in errors)
 

@@ -110,7 +110,13 @@ class ScopeManager:
 
         # Protocols & Ports
         self.allowed_protocols: Set[str] = {p.lower().strip() for p in (allowed_protocols or ["http", "https"])}
-        self.allowed_ports: Set[int] = {int(p) for p in (allowed_ports or [80, 443, 8080, 8443])}
+        self.allowed_ports: Set[int] = set()
+        for p in (allowed_ports or [80, 443, 8080, 8443]):
+            if isinstance(p, bool) or not isinstance(p, int):
+                raise TypeError(f"allowed_ports entry must be an integer, got {type(p).__name__}: {p}")
+            if not (1 <= p <= 65535):
+                raise ValueError(f"allowed_ports entry out of range (1-65535): {p}")
+            self.allowed_ports.add(p)
 
         # Third-party hosted service exclusions
         self.third_party_hosted_exclusions: Set[str] = set()
