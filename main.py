@@ -90,6 +90,7 @@ def show_scan_mode_menu():
 @click.option('--validate-timeout', default=10, help='Timeout for KeyHacks validation requests (default: 10)')
 @click.option('--template', type=click.Choice(['bugcrowd', 'hackerone', 'email']), default=None,
               help='Report template format (default: bugcrowd)')
+@click.option('--authorized-provider', 'authorized_providers', multiple=True, help='Authorized provider domain (can only narrow or specify when no profile restrictions)')
 @click.option('--reporter', default=None, help='Reporter name for the report')
 @click.option('--reporter-email', default=None, help='Reporter email address')
 @click.option('--program', default=None, help='Bug bounty program profile ID (e.g. uxcam, example-program)')
@@ -101,7 +102,7 @@ def main(ctx, target, target_list, urls, output, concurrency, depth, timeout,
          offline, patterns, verbose, quiet, config_file, mode, no_prompt,
          max_rps, allowed_domains, excluded_domains, scope_enabled, verify_tls, strict_scope,
          header_name, header_value, enable_header, validate_keys, validate_timeout,
-         template, reporter, reporter_email, program, confirm_review):
+         template, reporter, reporter_email, program, confirm_review, authorized_providers):
     """
     NightCrawler v5.0 - Multi-Program, Policy-Aware Bug Bounty Reconnaissance Framework
     
@@ -120,17 +121,28 @@ def main(ctx, target, target_list, urls, output, concurrency, depth, timeout,
     active_profile: Optional[ProgramProfile] = None
 
     if program:
-        active_profile = pm.get_profile(program)
+        try:
+            active_profile = pm.get_profile(program)
+        except Exception as e:
+            click.echo(click.style(f"\n[!] ERROR: Failed to load program profile '{program}': {e}\n", fg='red', bold=True))
+            sys.exit(1)
         if not active_profile:
             click.echo(click.style(f"\n[!] ERROR: Program profile '{program}' not found in programs/ directory!", fg='red', bold=True))
             click.echo(click.style(f"    Available programs: {', '.join([p['id'] for p in pm.list_profiles()])}\n", fg='yellow'))
             sys.exit(1)
     else:
         # Check if uxcam profile exists as default
-        active_profile = pm.get_profile("uxcam")
+        try:
+            active_profile = pm.get_profile("uxcam")
+        except Exception:
+            active_profile = None
 
     # Load base fallback configuration
-    cfg = load_config(config_file)
+    try:
+        cfg = load_config(config_file)
+    except (ValueError, TypeError, FileNotFoundError) as cfg_err:
+        click.echo(click.style(f"\n[!] CONFIG ERROR: {cfg_err}\n", fg='red', bold=True))
+        sys.exit(1)
 
     # Merge CLI options onto configuration
     if concurrency is not None:
@@ -219,7 +231,8 @@ def main(ctx, target, target_list, urls, output, concurrency, depth, timeout,
         "reporter": reporter,
         "reporter_email": reporter_email,
         "validate_keys": validate_keys if validate_keys else None,
-        "confirm_review": confirm_review if confirm_review else None
+        "confirm_review": confirm_review if confirm_review else None,
+        "authorized_providers": list(authorized_providers) if authorized_providers else None
     }
     # Filter out None values so EffectivePolicy uses base profile/config values
     cli_overrides = {k: v for k, v in cli_overrides.items() if v is not None}
@@ -302,7 +315,7 @@ def main(ctx, target, target_list, urls, output, concurrency, depth, timeout,
             click.echo(click.style(f"    Allowed domains: {', '.join(scope_mgr.allowed_domains)}", fg='yellow'))
             click.echo(click.style(f"    Excluded domains: {', '.join(scope_mgr.excluded_domains)}", fg='yellow'))
             click.echo(click.style("[!] Aborting to ensure bug bounty compliance.\n", fg='red'))
-            return
+            sys.exit(1)
 
     # Key validation safety check: close quiet/non-interactive bypass
     if effective_policy.validate_keys:

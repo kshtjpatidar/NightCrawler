@@ -95,12 +95,17 @@ class EffectivePolicy:
                 raise PolicyValidationError(f"Expected numeric value for {field_name}, got bool: {val}")
             if isinstance(val, str):
                 raise PolicyValidationError(f"Expected numeric value for {field_name}, got str: '{val}'")
-            if not isinstance(val, (int, float)):
+            if type(val) not in (int, float):
                 raise PolicyValidationError(f"Expected numeric value for {field_name}, got {type(val).__name__}")
-            if not math.isfinite(val):
-                raise PolicyValidationError(f"{field_name} must be finite (cannot be NaN or Infinity), got {val}")
+            try:
+                if not math.isfinite(val):
+                    raise PolicyValidationError(f"{field_name} must be finite (cannot be NaN or Infinity), got {val}")
+            except OverflowError:
+                raise PolicyValidationError(f"{field_name} value exceeds numeric bounds (OverflowError): {val}")
             if val <= 0:
                 raise PolicyValidationError(f"{field_name} must be strictly positive (> 0), got {val}")
+            if val > 1_000_000:
+                raise PolicyValidationError(f"{field_name} exceeds maximum allowable limit (1,000,000), got {val}")
 
         # 2. Validate integer-only fields (concurrency, timeout, crawl_depth)
         for field_name in ("concurrency", "timeout", "crawl_depth"):
@@ -113,8 +118,15 @@ class EffectivePolicy:
                 raise PolicyValidationError(f"Expected integer for {field_name}, got str: '{val}'")
             if type(val) is not int:
                 raise PolicyValidationError(f"Expected integer for {field_name}, got {type(val).__name__}")
+            try:
+                if not math.isfinite(val):
+                    raise PolicyValidationError(f"{field_name} must be finite (cannot be NaN or Infinity), got {val}")
+            except OverflowError:
+                raise PolicyValidationError(f"{field_name} value exceeds numeric bounds (OverflowError): {val}")
             if val <= 0:
                 raise PolicyValidationError(f"{field_name} must be strictly positive (> 0), got {val}")
+            if val > 1_000_000:
+                raise PolicyValidationError(f"{field_name} exceeds maximum allowable limit (1,000,000), got {val}")
 
         # 3. Security invariant: strict_scope requires verify_tls
         if self.strict_scope and not self.verify_tls:

@@ -36,36 +36,55 @@ def strict_bool(val: Any, field_name: str = "field") -> bool:
 
 def strict_positive_float(val: Any, field_name: str = "rate") -> float:
     """Strictly validate positive, non-NaN, non-Inf float."""
+    if isinstance(val, bool):
+        raise TypeError(f"Expected numeric value for {field_name}, got bool: {val}")
+    if type(val) not in (int, float, str):
+        raise TypeError(f"Expected numeric value for {field_name}, got {type(val).__name__}")
     try:
         f = float(val)
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, OverflowError):
         raise ValueError(f"Invalid numeric value for {field_name}: {val}")
-    if math.isnan(f) or math.isinf(f):
-        raise ValueError(f"{field_name} cannot be NaN or Infinity, got {val}")
+    try:
+        if not math.isfinite(f):
+            raise ValueError(f"{field_name} cannot be NaN or Infinity, got {val}")
+    except OverflowError:
+        raise ValueError(f"{field_name} value exceeds numeric bounds (OverflowError): {val}")
     if f <= 0:
         raise ValueError(f"{field_name} must be strictly positive (> 0), got {val}")
+    if f > 1_000_000:
+        raise ValueError(f"{field_name} exceeds maximum allowable limit (1,000,000), got {val}")
     return f
 
 
 def strict_positive_int(val: Any, field_name: str = "integer") -> int:
     """Strictly validate positive integer."""
     if isinstance(val, bool):
-        raise TypeError(f"Expected integer for {field_name}, got bool")
+        raise TypeError(f"Expected integer for {field_name}, got bool: {val}")
     if isinstance(val, float):
         raise TypeError(f"Expected integer for {field_name}, got float: {val}")
+    if type(val) not in (int, str):
+        raise TypeError(f"Expected integer for {field_name}, got {type(val).__name__}")
     if isinstance(val, str):
         if not val.strip().isdigit():
             raise ValueError(f"Invalid integer string for {field_name}: '{val}'")
-        i = int(val.strip())
+        try:
+            i = int(val.strip())
+        except (ValueError, TypeError, OverflowError):
+            raise ValueError(f"Invalid integer value for {field_name}: {val}")
     else:
         try:
-            if not isinstance(val, int):
-                raise TypeError(f"Expected integer for {field_name}, got {type(val).__name__}")
             i = int(val)
-        except (ValueError, TypeError):
+        except (ValueError, TypeError, OverflowError):
             raise ValueError(f"Invalid integer value for {field_name}: {val}")
+    try:
+        if not math.isfinite(i):
+            raise ValueError(f"{field_name} must be finite, got {val}")
+    except OverflowError:
+        raise ValueError(f"{field_name} value exceeds numeric bounds (OverflowError): {val}")
     if i <= 0:
         raise ValueError(f"{field_name} must be strictly positive (> 0), got {val}")
+    if i > 1_000_000:
+        raise ValueError(f"{field_name} exceeds maximum allowable limit (1,000,000), got {val}")
     return i
 
 
@@ -390,31 +409,31 @@ class PolicyParser:
         max_rps_val = rp_raw.get("max_rps", 5.0)
         try:
             max_rps = float(max_rps_val)
-        except (ValueError, TypeError):
+        except (ValueError, TypeError, OverflowError):
             raise ValueError(f"Invalid numeric value for request_policy.max_rps: {max_rps_val}")
 
         concurrency_val = rp_raw.get("concurrency", 1)
         try:
             concurrency = int(concurrency_val)
-        except (ValueError, TypeError):
+        except (ValueError, TypeError, OverflowError):
             raise ValueError(f"Invalid integer value for request_policy.concurrency: {concurrency_val}")
 
         timeout_val = rp_raw.get("timeout", 30)
         try:
             timeout = int(timeout_val)
-        except (ValueError, TypeError):
+        except (ValueError, TypeError, OverflowError):
             raise ValueError(f"Invalid integer value for request_policy.timeout: {timeout_val}")
 
         crawl_depth_val = rp_raw.get("crawl_depth", 1)
         try:
             crawl_depth = int(crawl_depth_val)
-        except (ValueError, TypeError):
+        except (ValueError, TypeError, OverflowError):
             raise ValueError(f"Invalid integer value for request_policy.crawl_depth: {crawl_depth_val}")
 
         per_host_rps_val = rp_raw.get("per_host_rps", max_rps)
         try:
             per_host_rps = float(per_host_rps_val)
-        except (ValueError, TypeError):
+        except (ValueError, TypeError, OverflowError):
             raise ValueError(f"Invalid numeric value for request_policy.per_host_rps: {per_host_rps_val}")
 
         request_policy = RequestPolicyDefinition(
@@ -662,18 +681,38 @@ class PolicyValidator:
 
         # 3. Request Policy Validation
         rps = profile.request_policy.max_rps
-        if math.isnan(rps) or math.isinf(rps):
-            errors.append("max_rps cannot be NaN or Infinity.")
-        elif rps <= 0:
+        try:
+            if not math.isfinite(rps):
+                errors.append("max_rps cannot be NaN or Infinity.")
+        except OverflowError:
+            errors.append("max_rps exceeds numeric bounds (OverflowError).")
+        if rps <= 0:
             errors.append(f"max_rps must be positive (> 0), got {rps}")
+        if rps > 1_000_000:
+            errors.append(f"max_rps exceeds maximum allowable limit (1,000,000), got {rps}")
 
         # Program-specific limits: UXCam strict maximum 5.0 RPS
         if profile.id == "uxcam" or any("uxcam.com" in d or "uxc.am" in d for d in profile.scope.allowed_domains):
             if rps > 5.0:
                 errors.append(f"UXCam program policy enforces hard maximum of 5.0 RPS (configured: {rps}).")
 
-        if profile.request_policy.concurrency < 1:
-            errors.append(f"concurrency must be at least 1, got {profile.request_policy.concurrency}")
+        conc = profile.request_policy.concurrency
+        if conc < 1:
+            errors.append(f"concurrency must be at least 1, got {conc}")
+        if conc > 1_000_000:
+            errors.append(f"concurrency exceeds maximum allowable limit (1,000,000), got {conc}")
+
+        tout = profile.request_policy.timeout
+        if tout < 1:
+            errors.append(f"timeout must be at least 1, got {tout}")
+        if tout > 1_000_000:
+            errors.append(f"timeout exceeds maximum allowable limit (1,000,000), got {tout}")
+
+        depth = profile.request_policy.crawl_depth
+        if depth < 1:
+            errors.append(f"crawl_depth must be at least 1, got {depth}")
+        if depth > 1_000_000:
+            errors.append(f"crawl_depth exceeds maximum allowable limit (1,000,000), got {depth}")
 
         if profile.request_policy.strict_scope and not profile.request_policy.verify_tls:
             errors.append("Insecure TLS configuration is prohibited when strict_scope is enabled.")

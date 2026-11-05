@@ -231,4 +231,13 @@ def load_config(config_file: Optional[str] = None) -> NightCrawlerConfig:
     if os.getenv("NIGHTCRAWLER_CONCURRENCY"):
         cfg.concurrency = strict_positive_int(os.getenv("NIGHTCRAWLER_CONCURRENCY"), "NIGHTCRAWLER_CONCURRENCY")
 
+    if os.getenv("NIGHTCRAWLER_TIMEOUT"):
+        cfg.timeout = strict_positive_int(os.getenv("NIGHTCRAWLER_TIMEOUT"), "NIGHTCRAWLER_TIMEOUT")
+
+    if os.getenv("NIGHTCRAWLER_DEPTH"):
+        cfg.depth = strict_positive_int(os.getenv("NIGHTCRAWLER_DEPTH"), "NIGHTCRAWLER_DEPTH")
+
+    if os.getenv("NIGHTCRAWLER_VERIFY_TLS"):
+        cfg.verify_tls = strict_bool(os.getenv("NIGHTCRAWLER_VERIFY_TLS"), "NIGHTCRAWLER_VERIFY_TLS")
+
     return cfg
