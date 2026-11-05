@@ -13,6 +13,7 @@ Validates all mandatory security invariants during application startup and CLI e
 """
 
 import os
+import errno
 import math
 import tempfile
 from pathlib import Path
@@ -29,7 +30,7 @@ from src.core.program_profile import (
     ProgramProfile, ScopeDefinition, RequestPolicyDefinition,
     strict_positive_float, strict_positive_int
 )
-from src.core.program_manager import ProgramManager
+from src.core.program_manager import ProgramManager, safe_lexists
 from src.core.request_config import NightCrawlerConfig
 from src.core.http_client import NightCrawlerHttpClient
 from src.validators.keyhacks import KeyHacksValidator
@@ -1171,4 +1172,234 @@ def test_filesystem_discovery_existing_invalid_uxcam_entry(tmp_path):
         assert mock_session.call_count == 0
         assert mock_conn.call_count == 0
         assert mock_popen.call_count == 0
+
+
+# ============================================================================
+# SECTION 8: ENOTDIR FAIL-CLOSED DISCOVERY & ERROR PROPAGATION AUDIT
+# ============================================================================
+
+def test_safe_lexists_strict_absence_vs_errors(tmp_path):
+    """
+    Verify safe_lexists returns False ONLY for FileNotFoundError / ENOENT,
+    and propagates NotADirectoryError (ENOTDIR), PermissionError (EACCES/EPERM),
+    and unexpected OSError conditions (EIO).
+    """
+    # 1. Genuinely absent entry
+    missing_entry = tmp_path / "absent_file.txt"
+    assert safe_lexists(missing_entry) is False
+
+    # 2. Existing regular file
+    reg_file = tmp_path / "regular_file.txt"
+    reg_file.write_text("hello")
+    assert safe_lexists(reg_file) is True
+
+    # 3. Existing directory
+    reg_dir = tmp_path / "regular_dir"
+    reg_dir.mkdir()
+    assert safe_lexists(reg_dir) is True
+
+    # 4. Broken symlink (must return True because the symlink itself exists)
+    broken_sym = tmp_path / "broken_symlink"
+    os.symlink("/nonexistent/target/path", broken_sym)
+    assert safe_lexists(broken_sym) is True
+
+    # 5. ENOTDIR: path component is a regular file
+    file_as_dir = reg_file / "child.txt"
+    with pytest.raises(NotADirectoryError):
+        safe_lexists(file_as_dir)
+
+    # 6. ENOTDIR via OSError with errno.ENOTDIR
+    with patch("os.lstat", side_effect=OSError(20, "Not a directory")):
+        with pytest.raises(OSError) as exc_info:
+            safe_lexists(tmp_path / "some_path")
+        assert exc_info.value.errno == 20
+
+    # 7. EACCES PermissionError
+    with patch("os.lstat", side_effect=PermissionError(13, "Permission denied")):
+        with pytest.raises(PermissionError):
+            safe_lexists(tmp_path / "denied_path")
+
+    # 8. EPERM PermissionError
+    with patch("os.lstat", side_effect=PermissionError(1, "Operation not permitted")):
+        with pytest.raises(PermissionError):
+            safe_lexists(tmp_path / "eperm_path")
+
+    # 9. EIO OSError
+    with patch("os.lstat", side_effect=OSError(5, "Input/output error")):
+        with pytest.raises(OSError) as exc_info:
+            safe_lexists(tmp_path / "eio_path")
+        assert exc_info.value.errno == 5
+
+
+def test_discovery_programs_is_regular_file_aborts_startup(tmp_path):
+    """
+    Verify that when programs/ exists as a regular file (not a directory):
+    1. find_profile_path raises ValueError.
+    2. profile_exists raises ValueError.
+    3. get_profile raises ValueError.
+    4. list_profiles raises ValueError.
+    5. main.py aborts with non-zero exit before any transport/scanner/subprocess initialization.
+    """
+    programs_file = tmp_path / "programs"
+    programs_file.write_text("not a directory")
+
+    pm = ProgramManager(base_dir=programs_file)
+
+    with pytest.raises(ValueError) as exc:
+        pm.find_profile_path("uxcam")
+    assert "not a directory" in str(exc.value).lower() or "unexpected filesystem object" in str(exc.value).lower()
+
+    with pytest.raises(ValueError):
+        pm.profile_exists("uxcam")
+
+    with pytest.raises(ValueError):
+        pm.get_profile("uxcam")
+
+    with pytest.raises(ValueError):
+        pm.list_profiles()
+
+    runner = CliRunner()
+    with patch("main.ProgramManager", lambda base_dir=None: pm), \
+         patch("src.core.scanner.NightCrawlerScanner.__init__") as mock_scanner, \
+         patch("aiohttp.ClientSession.__init__") as mock_session, \
+         patch("aiohttp.TCPConnector.__init__") as mock_conn, \
+         patch("subprocess.Popen") as mock_popen:
+
+        result = runner.invoke(main, ["-t", "uxcam.com", "--no-prompt"])
+
+        assert result.exit_code != 0
+        assert "failed to load default program profile" in result.output.lower() or "unexpected filesystem object" in result.output.lower()
+        assert mock_scanner.call_count == 0
+        assert mock_session.call_count == 0
+        assert mock_conn.call_count == 0
+        assert mock_popen.call_count == 0
+
+
+def test_discovery_ancestor_path_component_is_regular_file_aborts_startup(tmp_path):
+    """
+    Verify that when an ancestor path component of programs is a regular file:
+    1. os.lstat raises NotADirectoryError.
+    2. safe_lexists propagates NotADirectoryError (not returning False).
+    3. find_profile_path, profile_exists, get_profile, list_profiles propagate NotADirectoryError.
+    4. main.py aborts with non-zero exit before any transport/scanner/subprocess initialization.
+    """
+    file_ancestor = tmp_path / "ancestor_file"
+    file_ancestor.write_text("file content")
+    programs_dir = file_ancestor / "programs"
+
+    pm = ProgramManager(base_dir=programs_dir)
+
+    with pytest.raises(NotADirectoryError):
+        pm.find_profile_path("uxcam")
+
+    with pytest.raises(NotADirectoryError):
+        pm.profile_exists("uxcam")
+
+    with pytest.raises(NotADirectoryError):
+        pm.get_profile("uxcam")
+
+    with pytest.raises(NotADirectoryError):
+        pm.list_profiles()
+
+    runner = CliRunner()
+    with patch("main.ProgramManager", lambda base_dir=None: pm), \
+         patch("src.core.scanner.NightCrawlerScanner.__init__") as mock_scanner, \
+         patch("aiohttp.ClientSession.__init__") as mock_session, \
+         patch("aiohttp.TCPConnector.__init__") as mock_conn, \
+         patch("subprocess.Popen") as mock_popen:
+
+        result = runner.invoke(main, ["-t", "uxcam.com", "--no-prompt"])
+
+        assert result.exit_code != 0
+        assert "failed to load default program profile" in result.output.lower() or "not a directory" in result.output.lower()
+        assert mock_scanner.call_count == 0
+        assert mock_session.call_count == 0
+        assert mock_conn.call_count == 0
+        assert mock_popen.call_count == 0
+
+
+def test_discovery_enotdir_during_profile_file_discovery_aborts_startup(tmp_path):
+    """
+    Verify that ENOTDIR during profile file lookup inside profile directory:
+    1. Propagates NotADirectoryError from get_profile.
+    2. Does NOT get misclassified as 'contains no recognized profile file' or absence.
+    3. main.py aborts with non-zero exit before any transport/scanner/subprocess initialization.
+    """
+    programs_dir = tmp_path / "programs"
+    uxcam_dir = programs_dir / "uxcam"
+    uxcam_dir.mkdir(parents=True)
+
+    pm = ProgramManager(base_dir=programs_dir)
+
+    orig_safe_lexists = safe_lexists
+
+    def mock_safe_lexists(p):
+        path_str = str(p)
+        if "program.yaml" in path_str or "program.json" in path_str:
+            raise NotADirectoryError(20, "Not a directory")
+        return orig_safe_lexists(p)
+
+    with patch("src.core.program_manager.safe_lexists", side_effect=mock_safe_lexists):
+        with pytest.raises(NotADirectoryError):
+            pm.get_profile("uxcam")
+
+        runner = CliRunner()
+        with patch("main.ProgramManager", lambda base_dir=None: pm), \
+             patch("src.core.scanner.NightCrawlerScanner.__init__") as mock_scanner, \
+             patch("aiohttp.ClientSession.__init__") as mock_session, \
+             patch("aiohttp.TCPConnector.__init__") as mock_conn, \
+             patch("subprocess.Popen") as mock_popen:
+
+            result = runner.invoke(main, ["-t", "uxcam.com", "--no-prompt"])
+
+            assert result.exit_code != 0
+            assert "failed to load default program profile" in result.output.lower()
+            assert mock_scanner.call_count == 0
+            assert mock_session.call_count == 0
+            assert mock_conn.call_count == 0
+            assert mock_popen.call_count == 0
+
+
+def test_discovery_eperm_and_eacces_propagate_and_abort_startup(tmp_path):
+    """
+    Verify that EPERM and EACCES PermissionErrors:
+    1. Propagate out of find_profile_path, profile_exists, and get_profile.
+    2. Fail closed with non-zero exit in main.py before any network/scanner/subprocess initialization.
+    """
+    programs_dir = tmp_path / "programs"
+    programs_dir.mkdir(parents=True)
+    pm = ProgramManager(base_dir=programs_dir)
+
+    for error_cls, errno_val, msg in [
+        (PermissionError, 1, "Operation not permitted"),  # EPERM
+        (PermissionError, 13, "Permission denied"),       # EACCES
+        (OSError, 5, "Input/output error"),               # EIO
+    ]:
+        err = error_cls(errno_val, msg)
+        with patch.object(Path, "iterdir", side_effect=err):
+            with pytest.raises(error_cls):
+                pm.find_profile_path("uxcam")
+
+            with pytest.raises(error_cls):
+                pm.profile_exists("uxcam")
+
+            with pytest.raises(error_cls):
+                pm.get_profile("uxcam")
+
+            runner = CliRunner()
+            with patch("main.ProgramManager", lambda base_dir=None: pm), \
+                 patch("src.core.scanner.NightCrawlerScanner.__init__") as mock_scanner, \
+                 patch("aiohttp.ClientSession.__init__") as mock_session, \
+                 patch("aiohttp.TCPConnector.__init__") as mock_conn, \
+                 patch("subprocess.Popen") as mock_popen:
+
+                result = runner.invoke(main, ["-t", "uxcam.com", "--no-prompt"])
+
+                assert result.exit_code != 0
+                assert "failed to load default program profile" in result.output.lower()
+                assert mock_scanner.call_count == 0
+                assert mock_session.call_count == 0
+                assert mock_conn.call_count == 0
+                assert mock_popen.call_count == 0
+
 

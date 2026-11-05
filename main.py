@@ -128,7 +128,11 @@ def main(ctx, target, target_list, urls, output, concurrency, depth, timeout,
             sys.exit(1)
         if not active_profile:
             click.echo(click.style(f"\n[!] ERROR: Program profile '{program}' not found in programs/ directory!", fg='red', bold=True))
-            click.echo(click.style(f"    Available programs: {', '.join([p['id'] for p in pm.list_profiles()])}\n", fg='yellow'))
+            try:
+                available = ', '.join([p['id'] for p in pm.list_profiles()])
+            except Exception:
+                available = 'unknown'
+            click.echo(click.style(f"    Available programs: {available}\n", fg='yellow'))
             sys.exit(1)
         errors = PolicyValidator.validate(active_profile)
         if errors:

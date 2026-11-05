@@ -17,19 +17,23 @@ from src.core.program_profile import ProgramProfile, PolicyParser, PolicyValidat
 def safe_lexists(path: Union[str, Path]) -> bool:
     """
     Check if a filesystem entry exists (including broken symlinks) without masking
-    PermissionError or unexpected filesystem OSError conditions.
+    NotADirectoryError (ENOTDIR), PermissionError (EACCES/EPERM), or unexpected
+    filesystem OSError conditions.
 
     Returns True if the path exists (or is a symlink, regardless of target existence).
-    Returns False ONLY if FileNotFoundError or ENOTDIR occurs (demonstrably absent).
-    Propagates PermissionError (EACCES/EPERM) and all unexpected filesystem OSError conditions.
+    Returns False ONLY if FileNotFoundError or errno.ENOENT occurs (demonstrably absent).
+    Propagates NotADirectoryError (ENOTDIR), PermissionError (EACCES/EPERM), EIO,
+    and all unexpected filesystem OSError conditions.
     """
     try:
         os.lstat(path)
         return True
+    except NotADirectoryError:
+        raise
     except FileNotFoundError:
         return False
     except OSError as err:
-        if err.errno in (errno.ENOENT, errno.ENOTDIR):
+        if err.errno == errno.ENOENT:
             return False
         raise
 
