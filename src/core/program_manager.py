@@ -4,6 +4,7 @@ Handles lifecycle management, discovery, and manipulation of bug bounty program 
 """
 
 import os
+import re
 import shutil
 import json
 import errno
@@ -12,6 +13,31 @@ from typing import Dict, List, Optional, Any, Union
 import yaml
 
 from src.core.program_profile import ProgramProfile, PolicyParser, PolicyValidator
+
+PROGRAM_ID_PATTERN = re.compile(r'^[a-zA-Z0-9_-]+$')
+
+
+def validate_program_id(program_id: Any) -> str:
+    r"""
+    Centralized program ID validation.
+    Enforces strict identifier syntax: non-empty string matching ^[a-zA-Z0-9_-]+$.
+    Explicitly rejects traversal characters (.., /, \), drive prefixes (C:),
+    null bytes, Unicode or encoded variants, absolute paths, and whitespace.
+    Returns the validated, lowercased program ID string.
+    """
+    if not isinstance(program_id, str):
+        raise ValueError(f"Program profile ID must be a string, got {type(program_id).__name__}.")
+    raw = program_id.strip()
+    if not raw:
+        raise ValueError("Program profile ID cannot be empty or whitespace-only.")
+    if "\x00" in program_id or "/" in program_id or "\\" in program_id or ".." in program_id or ":" in program_id:
+        raise ValueError(f"Invalid program profile ID containing traversal sequences or path separators: '{program_id}'")
+    if not PROGRAM_ID_PATTERN.match(raw):
+        raise ValueError(
+            f"Invalid program profile ID: '{program_id}'. "
+            "Program IDs must contain only alphanumeric characters, hyphens, and underscores."
+        )
+    return raw.lower()
 
 
 def safe_lexists(path: Union[str, Path]) -> bool:
@@ -139,6 +165,8 @@ class ProgramManager:
         - If the profile is demonstrably absent after successful iteration, returns None.
         - If a matching entry is found, returns the Path to that entry.
         """
+        clean_id = validate_program_id(program_id)
+
         # 1. Distinguish demonstrably missing base_dir from inaccessible base_dir
         if not safe_lexists(self.base_dir):
             return None
@@ -147,7 +175,7 @@ class ProgramManager:
         if not self.base_dir.is_dir():
             raise ValueError(f"Program profile repository path '{self.base_dir}' is an unexpected filesystem object (expected a directory).")
 
-        clean_id = program_id.strip().lower()
+        canonical_base = self.base_dir.resolve()
         direct = self.base_dir / clean_id
         if safe_lexists(direct):
             return direct
@@ -269,12 +297,22 @@ class ProgramManager:
     def create_profile(self, profile_data: Dict[str, Any], save: bool = True) -> ProgramProfile:
         """Create a new program profile and optionally save to disk."""
         profile = PolicyParser.from_dict(profile_data)
+        clean_id = validate_program_id(profile.id)
+        profile.id = clean_id
         errors = PolicyValidator.validate(profile)
         if errors:
             raise ValueError(f"Invalid profile configuration: {', '.join(errors)}")
 
         if save:
-            target_path = self.base_dir / profile.id / "program.yaml"
+            target_dir = self.base_dir / clean_id
+            if safe_lexists(target_dir):
+                raise ValueError(f"Cannot create profile: profile '{clean_id}' already exists in repository.")
+            canonical_base = self.base_dir.resolve()
+            try:
+                target_dir.resolve().relative_to(canonical_base)
+            except ValueError:
+                raise ValueError(f"Path traversal detected in profile ID '{clean_id}'.")
+            target_path = target_dir / "program.yaml"
             profile.save_yaml(target_path)
         return profile
 
@@ -336,8 +374,27 @@ class ProgramManager:
             else:
                 profile = PolicyParser.from_text_rules("imported-program", "Imported Program", content)
 
+        # 1. Validate profile ID strictly
+        clean_id = validate_program_id(profile.id)
+        profile.id = clean_id
+
+        # 2. Validate policy before writing anything to disk
+        errors = PolicyValidator.validate(profile)
+        if errors:
+            raise ValueError(f"Invalid profile configuration in import: {', '.join(errors)}")
+
+        target_dir = self.base_dir / clean_id
+        if safe_lexists(target_dir):
+            raise ValueError(f"Cannot import profile: profile '{clean_id}' already exists in repository.")
+
+        canonical_base = self.base_dir.resolve()
+        try:
+            target_dir.resolve().relative_to(canonical_base)
+        except ValueError:
+            raise ValueError(f"Path traversal detected in profile ID '{clean_id}'.")
+
         # Save imported profile
-        target_path = self.base_dir / profile.id / "program.yaml"
+        target_path = target_dir / "program.yaml"
         profile.save_yaml(target_path)
         return profile
 
@@ -360,15 +417,31 @@ class ProgramManager:
 
     def duplicate_profile(self, source_id: str, new_id: str, new_name: Optional[str] = None) -> ProgramProfile:
         """Duplicate an existing profile under a new ID and name."""
+        clean_new_id = validate_program_id(new_id)
         source = self.get_profile(source_id)
         if not source:
             raise ValueError(f"Source program profile '{source_id}' not found.")
 
+        target_dir = self.base_dir / clean_new_id
+        if safe_lexists(target_dir):
+            raise ValueError(f"Cannot duplicate profile: target profile directory '{clean_new_id}' already exists.")
+
+        canonical_base = self.base_dir.resolve()
+        try:
+            target_dir.resolve().relative_to(canonical_base)
+        except ValueError:
+            raise ValueError(f"Path traversal detected: target directory '{clean_new_id}' escapes base directory.")
+
         data = source.to_dict()
-        data["id"] = new_id.lower().strip()
+        data["id"] = clean_new_id
         data["name"] = new_name or f"{source.name} (Copy)"
         new_profile = PolicyParser.from_dict(data)
 
-        target_path = self.base_dir / new_profile.id / "program.yaml"
+        # Validate policy before saving
+        errors = PolicyValidator.validate(new_profile)
+        if errors:
+            raise ValueError(f"Validation failed for duplicated profile: {', '.join(errors)}")
+
+        target_path = target_dir / "program.yaml"
         new_profile.save_yaml(target_path)
         return new_profile

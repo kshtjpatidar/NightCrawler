@@ -199,6 +199,96 @@ def parse_authorized_providers(val: Any, context: str = "program profile") -> Li
     return sorted(cleaned)
 
 
+def validate_domain_entry(entry: Any, list_name: str = "allowed_domains", context: str = "") -> str:
+    """
+    Validate a single domain entry in allowed_domains or excluded_domains.
+    Rejects:
+    - Non-string types, empty strings, whitespace
+    - Catch-all wildcards ('*', 'all', '*.*')
+    - Schemes ('://'), paths ('/'), query strings ('?'), fragments ('#')
+    - Ports (':') and userinfo ('@')
+    - IP literals (IPv4 and IPv6)
+    - Malformed wildcard syntax (must be '*.domain.tld' if wildcard)
+    - Hostnames exceeding 253 characters, or labels exceeding 63 characters
+    - Non-compliant DNS characters according to RFC 1035 / IDNA.
+    Returns normalized string.
+    """
+    ctx_prefix = f"{context}: " if context else ""
+    if not isinstance(entry, str):
+        raise ValueError(f"{ctx_prefix}Domain entry in {list_name} must be a string, got {type(entry).__name__}: {entry}")
+
+    val = entry.strip()
+    if not val:
+        raise ValueError(f"{ctx_prefix}Domain entry in {list_name} cannot be empty or whitespace-only.")
+
+    if val.lower() in ("*", "all", "*.*"):
+        raise ValueError(f"{ctx_prefix}Dangerous wildcard/catch-all domain '{entry}' in {list_name} is prohibited.")
+
+    if any(c.isspace() for c in val):
+        raise ValueError(f"{ctx_prefix}Domain entry '{entry}' in {list_name} contains forbidden embedded whitespace.")
+
+    if "://" in val:
+        raise ValueError(f"{ctx_prefix}Domain entry '{entry}' in {list_name} contains URL scheme (must be hostname only).")
+
+    if "/" in val or "\\" in val or "?" in val or "#" in val:
+        raise ValueError(f"{ctx_prefix}Domain entry '{entry}' in {list_name} contains URL path, query, or fragment characters.")
+
+    if "@" in val:
+        raise ValueError(f"{ctx_prefix}Domain entry '{entry}' in {list_name} contains userinfo ('@').")
+
+    if ":" in val:
+        raise ValueError(f"{ctx_prefix}Domain entry '{entry}' in {list_name} contains port or separator (':').")
+
+    # Reject IP literals (IPs belong in allowed_ips / excluded_ips)
+    try:
+        ipaddress.ip_address(val)
+        raise ValueError(f"{ctx_prefix}IP literal '{entry}' in {list_name} is not permitted in domain lists (use allowed_ips/excluded_ips).")
+    except ValueError as e:
+        if "is not permitted in domain lists" in str(e):
+            raise
+
+    # Handle wildcard syntax
+    test_val = val
+    if "*" in val:
+        if not val.startswith("*."):
+            raise ValueError(
+                f"{ctx_prefix}Malformed wildcard domain '{entry}' in {list_name}. "
+                "Wildcard domains must use the standard format '*.example.com'."
+            )
+        remainder = val[2:]
+        if "*" in remainder:
+            raise ValueError(f"{ctx_prefix}Malformed wildcard domain '{entry}' in {list_name}: multiple wildcard characters.")
+        if not remainder or remainder.startswith("."):
+            raise ValueError(f"{ctx_prefix}Malformed wildcard domain '{entry}' in {list_name}: missing base domain after '*.'")
+        test_val = remainder
+
+    # Convert IDN / punycode if needed
+    try:
+        ascii_domain = test_val.encode("idna").decode("ascii").lower()
+    except Exception as e:
+        raise ValueError(f"{ctx_prefix}Domain entry '{entry}' in {list_name} failed IDNA encoding: {e}")
+
+    # Enforce DNS length limits
+    if len(ascii_domain) > 253:
+        raise ValueError(f"{ctx_prefix}Domain entry '{entry}' in {list_name} exceeds maximum length of 253 characters.")
+
+    labels = ascii_domain.split(".")
+    if len(labels) < 2:
+        raise ValueError(f"{ctx_prefix}Domain entry '{entry}' in {list_name} must contain at least two labels (e.g., example.com).")
+
+    # Validate each label
+    label_pattern = re.compile(r'^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$')
+    for label in labels:
+        if not label:
+            raise ValueError(f"{ctx_prefix}Domain entry '{entry}' in {list_name} contains empty label.")
+        if len(label) > 63:
+            raise ValueError(f"{ctx_prefix}Label '{label}' in domain entry '{entry}' exceeds maximum length of 63 characters.")
+        if not label_pattern.match(label):
+            raise ValueError(f"{ctx_prefix}Label '{label}' in domain entry '{entry}' contains invalid DNS characters.")
+
+    return val.lower()
+
+
 @dataclass
 class ScopeDefinition:
     enabled: bool = True
@@ -692,6 +782,26 @@ class PolicyValidator:
             if not (profile.scope.allowed_domains or profile.scope.allowed_ips or profile.scope.allowed_cidrs):
                 errors.append(f"Profile '{profile.id}' has scope enabled but defines no allowed domains, IPs, or CIDRs.")
 
+        # Validate domain entries (both allowed and excluded)
+        for d in profile.scope.allowed_domains:
+            try:
+                validate_domain_entry(d, "allowed_domains", context=f"profile '{profile.id}'")
+            except ValueError as ve:
+                errors.append(str(ve))
+
+        for d in profile.scope.excluded_domains:
+            try:
+                validate_domain_entry(d, "excluded_domains", context=f"profile '{profile.id}'")
+            except ValueError as ve:
+                errors.append(str(ve))
+
+        for d in profile.scope.third_party_hosted_exclusions:
+            try:
+                validate_domain_entry(d, "third_party_hosted_exclusions", context=f"profile '{profile.id}'")
+            except ValueError as ve:
+                errors.append(str(ve))
+
+        if profile.scope.enabled:
             # Validate CIDR notations
             for cidr in profile.scope.allowed_cidrs:
                 try:

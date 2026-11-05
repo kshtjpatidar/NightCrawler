@@ -37,6 +37,13 @@ from src.validators.keyhacks import KeyHacksValidator
 from src.core.scanner import NightCrawlerScanner
 
 
+def _mock_asyncio_run(coro):
+    """Mock asyncio.run while safely closing unexecuted coroutine objects to avoid RuntimeWarning."""
+    if hasattr(coro, "close"):
+        coro.close()
+    return None
+
+
 @pytest.fixture
 def example_profile():
     pm = ProgramManager()
@@ -537,7 +544,7 @@ def test_default_profile_missing_falls_back_to_valid_config():
     with patch("src.core.program_manager.ProgramManager.profile_exists", return_value=False), \
          patch("src.core.program_manager.ProgramManager.get_profile", return_value=None), \
          patch("src.core.scanner.NightCrawlerScanner.__init__", return_value=None) as mock_scanner, \
-         patch("asyncio.run", return_value=None):
+         patch("asyncio.run", side_effect=_mock_asyncio_run):
 
         result = runner.invoke(main, ["-t", "uxcam.com", "--no-prompt"])
 
@@ -938,7 +945,7 @@ def test_default_profile_genuinely_absent_fallback_independently_validated(tmp_p
     # Scenario A: Valid base configuration proceeds
     with patch("main.ProgramManager", lambda base_dir=None: pm), \
          patch("src.core.scanner.NightCrawlerScanner.__init__", return_value=None) as mock_scanner, \
-         patch("asyncio.run", return_value=None):
+         patch("asyncio.run", side_effect=_mock_asyncio_run):
 
         result = runner.invoke(main, ["-t", "uxcam.com", "--no-prompt", "--header-value", "researcher@example.com"])
         assert "failed to load default program profile" not in result.output.lower()
@@ -981,7 +988,7 @@ def test_filesystem_discovery_missing_programs_directory(tmp_path):
     runner = CliRunner()
     with patch("main.ProgramManager", lambda base_dir=None: pm), \
          patch("src.core.scanner.NightCrawlerScanner.__init__", return_value=None) as mock_scanner, \
-         patch("asyncio.run", return_value=None):
+         patch("asyncio.run", side_effect=_mock_asyncio_run):
 
         result = runner.invoke(main, ["-t", "uxcam.com", "--no-prompt", "--header-value", "researcher@example.com"])
         assert "failed to load default program profile" not in result.output.lower()
@@ -1128,7 +1135,7 @@ def test_filesystem_discovery_genuinely_absent_uxcam_profile(tmp_path):
     runner = CliRunner()
     with patch("main.ProgramManager", lambda base_dir=None: pm), \
          patch("src.core.scanner.NightCrawlerScanner.__init__", return_value=None) as mock_scanner, \
-         patch("asyncio.run", return_value=None):
+         patch("asyncio.run", side_effect=_mock_asyncio_run):
 
         result = runner.invoke(main, ["-t", "uxcam.com", "--no-prompt", "--header-value", "researcher@example.com"])
         assert "failed to load default program profile" not in result.output.lower()

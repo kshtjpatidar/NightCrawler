@@ -32,7 +32,7 @@ from src.validators.keyhacks import KeyHacksValidator, ValidationStatus
 
 # Multi-Program Framework Components
 from src.core.program_manager import ProgramManager
-from src.core.program_profile import ProgramProfile, PolicyParser, PolicyValidator
+from src.core.program_profile import ProgramProfile, PolicyParser, PolicyValidator, strict_positive_int
 from src.core.effective_policy import EffectivePolicy
 from src.core.request_policy import RequestPolicyManager
 from src.core.auth_manager import AuthenticationManager
@@ -212,6 +212,15 @@ def main(ctx, target, target_list, urls, output, concurrency, depth, timeout,
     if validate_keys:
         cfg.validate_keys = True
 
+    # NC-SEC-04: Strict validate-timeout check
+    try:
+        if isinstance(validate_timeout, bool):
+            raise TypeError(f"validate_timeout must be an integer, got bool: {validate_timeout}")
+        validated_validate_timeout = strict_positive_int(validate_timeout, "validate_timeout")
+    except (ValueError, TypeError) as vt_err:
+        click.echo(click.style(f"\n[!] POLICY ERROR: Invalid validate_timeout: {vt_err}\n", fg='red', bold=True))
+        sys.exit(1)
+
     # P0: Validate Rate Limit (Reject non-positive RPS, enforce hard maximum of 5 for UXCam profile)
     if cfg.max_requests_per_second <= 0:
         click.echo(click.style(f"\n[!] ERROR: max-rps must be a positive number (> 0), got {cfg.max_requests_per_second}!\n", fg='red', bold=True))
@@ -354,7 +363,7 @@ def main(ctx, target, target_list, urls, output, concurrency, depth, timeout,
         else:
             keyhacks_validator = KeyHacksValidator.from_policy(
                 effective_policy=effective_policy,
-                timeout=validate_timeout
+                timeout=validated_validate_timeout
             )
             keyhacks_validator.print_disclaimer()
             if not click.confirm(click.style('[?] Do you confirm you have explicit authorization to validate these secrets?', fg='yellow'), default=False):

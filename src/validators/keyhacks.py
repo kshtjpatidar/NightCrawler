@@ -29,7 +29,7 @@ from rich.console import Console
 from src.core.http_client import _in_concurrency_scope, PolicyAwareResolver
 from src.core.audit_logger import AuditLogger
 from src.output.html_report import mask_secret
-from src.core.program_profile import parse_authorized_providers
+from src.core.program_profile import parse_authorized_providers, strict_positive_int
 
 console = Console()
 
@@ -1109,9 +1109,17 @@ class KeyHacksValidator:
         authorized_providers: Optional[Set[str]] = None
     ):
         # Support legacy positional signatures, e.g. KeyHacksValidator(timeout=10, verify_ssl=True)
-        if isinstance(effective_policy, (int, float)):
-            timeout = int(effective_policy)
+        if effective_policy is not None and not hasattr(effective_policy, "scope_manager") and not hasattr(effective_policy, "request_policy_manager"):
+            timeout = effective_policy
             effective_policy = None
+
+        if isinstance(timeout, bool):
+            raise TypeError(f"Expected integer for timeout, got bool: {timeout}")
+        if isinstance(timeout, float):
+            raise TypeError(f"Expected integer for timeout, got float: {timeout}")
+        if isinstance(timeout, str):
+            raise TypeError(f"Expected integer for timeout, got str: '{timeout}'")
+        validated_timeout = strict_positive_int(timeout, "timeout")
 
         if effective_policy is not None:
             self.effective_policy = effective_policy
@@ -1163,7 +1171,8 @@ class KeyHacksValidator:
         if self.http_client is not None and self.effective_policy is None and not getattr(self.http_client, "authorized_providers", None):
             self.http_client.authorized_providers = self._authorized_providers
 
-        self.timeout = aiohttp.ClientTimeout(total=timeout)
+        self.timeout_seconds = validated_timeout
+        self.timeout = aiohttp.ClientTimeout(total=validated_timeout)
         self.validated_count = 0
         self.valid_secrets = []
 
@@ -1202,6 +1211,15 @@ class KeyHacksValidator:
         authorized_providers: Optional[Set[str]] = None
     ) -> "KeyHacksValidator":
         """Construct a KeyHacksValidator wired with all mandatory policy dependencies from an EffectivePolicy."""
+        # Strictly validate timeout BEFORE creating http_client or any network resources
+        if isinstance(timeout, bool):
+            raise TypeError(f"Expected integer for timeout, got bool: {timeout}")
+        if isinstance(timeout, float):
+            raise TypeError(f"Expected integer for timeout, got float: {timeout}")
+        if isinstance(timeout, str):
+            raise TypeError(f"Expected integer for timeout, got str: '{timeout}'")
+        validated_timeout = strict_positive_int(timeout, "timeout")
+
         policy_tls = getattr(effective_policy, "verify_tls", None)
         verify_ssl = policy_tls if policy_tls is not None else True
         policy_state_changing = getattr(effective_policy, "allow_state_changing", False)
@@ -1239,7 +1257,7 @@ class KeyHacksValidator:
             http_client=http_client,
             request_policy_manager=getattr(effective_policy, "request_policy_manager", None),
             scope_manager=getattr(effective_policy, "scope_manager", None),
-            timeout=timeout,
+            timeout=validated_timeout,
             verify_ssl=verify_ssl,
             allow_state_changing=effective_state_changing,
             authorized_providers=providers

@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from typing import Dict, Any, List, Optional, Set
 
 from src.core.program_profile import (
-    ProgramProfile, PolicyValidator, PolicyValidationError, strict_bool, strict_positive_float, strict_positive_int, parse_authorized_providers
+    ProgramProfile, PolicyValidator, PolicyValidationError, strict_bool, strict_positive_float, strict_positive_int, parse_authorized_providers, validate_domain_entry
 )
 from src.core.scope import ScopeManager
 from src.core.request_policy import RequestPolicyManager
@@ -69,8 +69,16 @@ class EffectivePolicy:
     http_client: Optional[Any] = None
 
     def __setattr__(self, name: str, value: Any):
+        # 1. Lock attribute protection: disallow changing or disabling locks once active
+        if name in ("_policy_locked", "_authorized_providers_locked"):
+            if getattr(self, name, False):
+                raise AttributeError(f"Cannot modify policy lock attribute '{name}' on EffectivePolicy.")
+            super().__setattr__(name, value)
+            return
+
+        # 2. authorized_providers handling during initialization or if locked
         if name == "authorized_providers":
-            if getattr(self, "_authorized_providers_locked", False):
+            if getattr(self, "_authorized_providers_locked", False) or getattr(self, "_policy_locked", False):
                 raise AttributeError("Cannot reassign or mutate authorized_providers on EffectivePolicy; permissions are immutable.")
             if value is None:
                 val = frozenset()
@@ -80,6 +88,64 @@ class EffectivePolicy:
             super().__setattr__("authorized_providers", val)
             super().__setattr__("_authorized_providers_locked", True)
             return
+
+        # 3. If policy is locked, enforce immutability
+        if getattr(self, "_policy_locked", False):
+            security_fields = {
+                "verify_tls",
+                "strict_scope",
+                "scope_enabled",
+                "allow_state_changing",
+                "max_rps",
+                "per_host_rps",
+                "concurrency",
+                "timeout",
+                "crawl_depth",
+                "authorized_providers",
+                "scope_manager",
+                "request_policy_manager",
+                "auth_manager",
+                "permission_manager",
+                "tool_compatibility_manager",
+                "program_id",
+                "program_name",
+                "version",
+                "platform",
+                "policy_url",
+                "description",
+                "default_template",
+                "default_format",
+                "reporter_name",
+                "reporter_email",
+                "requires_review",
+                "review_notes",
+            }
+            if name in security_fields:
+                raise AttributeError(f"Cannot reassign or mutate security-critical field '{name}' on EffectivePolicy; policy is immutable.")
+
+            # Controlled operational exceptions:
+            # a) validate_keys: may only be narrowed to False (e.g. user declines active key validation)
+            if name == "validate_keys":
+                if value is True and not self.validate_keys:
+                    raise AttributeError("Cannot expand validate_keys permission on locked EffectivePolicy.")
+                if not isinstance(value, bool):
+                    raise TypeError(f"validate_keys must be a boolean, got {type(value).__name__}")
+                super().__setattr__("validate_keys", value)
+                return
+
+            # b) http_client: late dependency wiring permitted
+            if name == "http_client":
+                super().__setattr__("http_client", value)
+                return
+
+            # c) audit_logger: late dependency wiring permitted
+            if name == "audit_logger":
+                super().__setattr__("audit_logger", value)
+                return
+
+            # Any other attribute assignment on locked policy is disallowed
+            raise AttributeError(f"Cannot modify attribute '{name}' on immutable EffectivePolicy.")
+
         super().__setattr__(name, value)
 
     def __post_init__(self):
@@ -126,6 +192,15 @@ class EffectivePolicy:
         # 3. Security invariant: strict_scope requires verify_tls
         if self.strict_scope and not self.verify_tls:
             raise PolicyValidationError("Insecure TLS configuration is prohibited in strict compliance mode.")
+
+        # 4. Immutability lock activation
+        if hasattr(self, "review_notes") and self.review_notes:
+            super().__setattr__("review_notes", tuple(self.review_notes))
+        else:
+            super().__setattr__("review_notes", ())
+
+        super().__setattr__("_authorized_providers_locked", True)
+        super().__setattr__("_policy_locked", True)
 
     @classmethod
     def build(
@@ -357,27 +432,32 @@ class EffectivePolicy:
                 profile_scope = ScopeManager.from_profile(profile)
                 narrowed = []
                 for d in overrides["allowed_domains"]:
-                    d_str = str(d).strip()
-                    if not d_str:
-                        continue
-                    clean_d = ScopeManager._normalize_domain(d_str)
+                    valid_d = validate_domain_entry(d, "allowed_domains", context="CLI overrides")
+                    clean_d = ScopeManager._normalize_domain(valid_d)
                     if not profile_scope.is_host_allowed(clean_d):
                         raise ValueError(
-                            f"CLI cannot expand program '{profile.id}' authorized scope with '{d_str}'. "
+                            f"CLI cannot expand program '{profile.id}' authorized scope with '{valid_d}'. "
                             f"Target is outside authorized profile scope. Only scope narrowing is permitted."
                         )
-                    narrowed.append(d_str)
+                    narrowed.append(valid_d)
                 if not narrowed:
                     raise ValueError(f"Target scope cannot be empty after narrowing program '{profile.id}' scope.")
                 allowed_domains = narrowed
             else:
-                allowed_domains = [str(d).strip() for d in overrides["allowed_domains"] if str(d).strip()]
+                allowed_domains = [validate_domain_entry(d, "allowed_domains", context="CLI overrides") for d in overrides["allowed_domains"]]
 
         if overrides.get("excluded_domains"):
             for d in overrides["excluded_domains"]:
-                d_str = str(d).strip()
-                if d_str and d_str not in excluded_domains:
-                    excluded_domains.append(d_str)
+                valid_d = validate_domain_entry(d, "excluded_domains", context="CLI overrides")
+                if valid_d not in excluded_domains:
+                    excluded_domains.append(valid_d)
+
+        # Validate base configuration domains if no profile was provided
+        if not profile:
+            for d in allowed_domains:
+                validate_domain_entry(d, "allowed_domains", context=f"policy '{p_id}'")
+            for d in excluded_domains:
+                validate_domain_entry(d, "excluded_domains", context=f"policy '{p_id}'")
 
         # Safety Check: Empty scope rejection (Fail-closed policy initialization)
         if effective_scope_enabled:

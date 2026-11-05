@@ -6,9 +6,10 @@ third-party services, or leaked into logs or process tables.
 """
 
 import os
+import re
 import base64
 from pathlib import Path
-from typing import Dict, Optional, Any
+from typing import Dict, Optional, Any, List
 from urllib.parse import urlparse
 
 from src.core.program_profile import AuthenticationDefinition, ProgramProfile
@@ -20,6 +21,85 @@ class AuthenticationManager:
     Manages program authentication tokens and headers.
     Strictly prevents credential forwarding to out-of-scope hosts and archives.
     """
+
+    KNOWN_CREDENTIAL_HEADERS = {
+        "authorization",
+        "proxy-authorization",
+        "cookie",
+        "set-cookie",
+        "x-api-key",
+        "api-key",
+        "apikey",
+        "token",
+        "x-token",
+        "x-auth-token",
+        "x-user-token",
+        "x-access-token",
+        "secret",
+        "x-secret",
+        "x-secret-token",
+        "x-csrf-token",
+        "x-xsrf-token",
+        "x-session-token",
+        "bearer",
+        "x-bearer-token",
+    }
+
+    CREDENTIAL_HEADER_TERMS = {
+        "key",
+        "token",
+        "secret",
+        "auth",
+        "pass",
+        "credential",
+        "session",
+    }
+
+    RESEARCHER_SAFE_HEADERS = {
+        "user-agent",
+        "x-user-id",
+        "x-researcher-email",
+        "x-researcher-id",
+        "x-bug-bounty",
+        "x-security-scan",
+        "x-security-researcher",
+        "x-authorized-researcher",
+        "x-hackerone-research",
+        "x-bugcrowd-research",
+        "x-contact",
+        "x-custom-env",
+        "accept",
+        "accept-encoding",
+        "accept-language",
+        "content-type",
+        "host",
+    }
+
+    @classmethod
+    def is_sensitive_credential_header(cls, header_name: str, configured_auth_header: Optional[str] = None) -> bool:
+        """
+        Classify whether a header name is a sensitive credential-bearing header.
+        Case-insensitive. Uses exact matches on known credential headers,
+        the explicitly configured auth header name, and a conservative heuristic classifier,
+        while explicitly preserving researcher identification and standard HTTP headers.
+        """
+        if not header_name:
+            return False
+        lower = header_name.strip().lower()
+        if configured_auth_header and lower == configured_auth_header.strip().lower():
+            return True
+        if lower in cls.KNOWN_CREDENTIAL_HEADERS:
+            return True
+        if lower in cls.RESEARCHER_SAFE_HEADERS:
+            return False
+        # Conservative classifier: any header whose name tokens indicate credentials
+        tokens = set(re.split(r'[-_]', lower))
+        if tokens & cls.CREDENTIAL_HEADER_TERMS:
+            return True
+        for term in ("apikey", "token", "secret", "password", "credential", "auth_token", "auth-token"):
+            if term in lower:
+                return True
+        return False
 
     def __init__(
         self,
@@ -195,10 +275,9 @@ class AuthenticationManager:
         if sc and sc.enabled:
             if not sc.is_url_in_scope(url):
                 # Out-of-scope destination: remove all sensitive headers and return unauthenticated
-                headers.pop("Authorization", None)
-                headers.pop("authorization", None)
-                headers.pop("Cookie", None)
-                headers.pop("cookie", None)
+                for k in list(headers.keys()):
+                    if self.is_sensitive_credential_header(k, self._auth_header_name):
+                        headers.pop(k, None)
                 for k in self._custom_headers:
                     headers.pop(k, None)
                 return headers
@@ -209,12 +288,12 @@ class AuthenticationManager:
 
         # Cross-Origin Protection:
         # If this request is following a cross-origin redirect, sensitive credentials
-        # (Authorization header, session cookies, API tokens) must NOT be forwarded!
+        # (Authorization header, session cookies, API tokens, sensitive custom headers)
+        # must NOT be forwarded to another origin!
         if is_cross_origin:
-            headers.pop("Authorization", None)
-            headers.pop("authorization", None)
-            headers.pop("Cookie", None)
-            headers.pop("cookie", None)
+            for k in list(headers.keys()):
+                if self.is_sensitive_credential_header(k, self._auth_header_name):
+                    headers.pop(k, None)
             return headers
 
         # Same-origin: attach auth header and cookies if configured
