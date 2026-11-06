@@ -53,22 +53,25 @@ NightCrawler v5.0 is a modular bug bounty reconnaissance framework. Rather than 
 
 ```mermaid
 flowchart TD
-    Profile[Program Profile YAML/JSON] --> PM[ProgramManager]
-    PM --> PolicyVal[PolicyValidator]
-    PolicyVal --> CLI[CLI Options & Overrides]
-    CLI --> EffPol[EffectivePolicy\n(Single Authoritative Source of Truth)]
+    Profile["Program Profile (YAML/JSON)"] --> PM["ProgramManager"]
+    PM --> PolicyVal["PolicyValidator"]
+    PolicyVal --> CLI["CLI Options & Overrides"]
+    CLI --> EffPol["EffectivePolicy<br/>(Single Authoritative Source of Truth)"]
     
-    EffPol --> SM[ScopeManager\n(Exact & Wildcard Domains, CIDRs, Paths)]
-    EffPol --> RPM[RequestPolicyManager\n(Global & Per-Host Rate Limits)]
-    EffPol --> AM[AuthenticationManager\n(Headers, Bearer, Cookies, Isolation)]
-    EffPol --> TPM[TestingPermissionManager\n(Safety Ceilings)]
-    EffPol --> TCM[ToolCompatibilityManager\n(Capability Matrix)]
+    EffPol --> SM["ScopeManager<br/>(Exact & Wildcard Domains, CIDRs, Paths)"]
+    EffPol --> RPM["RequestPolicyManager<br/>(Global & Per-Host Rate Limits)"]
+    EffPol --> AM["AuthenticationManager<br/>(Headers, Bearer, Cookies, Isolation)"]
+    EffPol --> TPM["TestingPermissionManager<br/>(Safety Ceilings)"]
+    EffPol --> TCM["ToolCompatibilityManager<br/>(Capability Matrix)"]
     
-    SM & RPM & AM --> Client[NightCrawlerHttpClient\n(Hop-by-Hop Redirect Checks & Token Pacing)]
-    Client --> Audit[AuditLogger\n(Structured JSONL Logs with Redaction)]
-    Client --> Engine[NightCrawlerScanner]
-    TPM & TCM --> Engine
-    Engine --> RepM[ReportManager\n(HTML, JSON, Markdown with Lifecycle Classification)]
+    SM --> Client["NightCrawlerHttpClient<br/>(Hop-by-Hop Redirect Checks & Token Pacing)"]
+    RPM --> Client
+    AM --> Client
+    Client --> Audit["AuditLogger<br/>(Structured JSONL Logs with Redaction)"]
+    Client --> Engine["NightCrawlerScanner"]
+    TPM --> Engine
+    TCM --> Engine
+    Engine --> RepM["ReportManager<br/>(HTML, JSON, Markdown with Lifecycle Classification)"]
 ```
 
 ### Core Architecture Components
@@ -272,6 +275,8 @@ NightCrawler enforces a deterministic, 4-tier configuration precedence model whe
 
 ---
 
+## 🛡️ Scope Configuration
+
 NightCrawler's `ScopeManager` enforces comprehensive boundaries:
 
 - **Exact Hostname Matching**: An entry like `example.com` matches **only** the bare apex hostname `example.com`. It does **not** match subdomains unless explicitly paired with a wildcard.
@@ -433,14 +438,14 @@ Supported formats:
 
 ## 🧪 Automated Testing
 
-NightCrawler includes a test suite covering program profiles, scope matching, rate limits, credential isolation, tool compatibility, and audit logging:
+NightCrawler includes a comprehensive test suite covering program profiles, scope matching, rate limits, credential isolation, tool compatibility, descriptor-relative filesystem writes, race resistance, and audit logging:
 
 ```bash
 python3 -m pytest tests/ -v
 ```
 
 ```
-============================== 59 passed in 3.92s ==============================
+============================ 912 passed in 29.67s ============================
 ```
 
 ---
