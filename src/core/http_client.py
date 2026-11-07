@@ -20,6 +20,37 @@ import aiohttp
 import aiohttp.abc
 import aiohttp.resolver
 
+try:
+    from typing import TypedDict
+except ImportError:  # pragma: no cover
+    from typing_extensions import TypedDict  # type: ignore
+
+# In aiohttp >= 3.10, ResolveResult is a TypedDict defined in aiohttp.abc
+# and re-exported in aiohttp.resolver. In aiohttp 3.9.1 (and earlier),
+# ResolveResult is not present in aiohttp.abc, aiohttp.resolver, or aiohttp.typedefs;
+# AbstractResolver.resolve returns List[Dict[str, Any]].
+# Provide a compatibility ResolveResult TypedDict for backwards compatibility across versions.
+try:
+    from aiohttp.abc import ResolveResult
+except ImportError:
+    try:
+        from aiohttp.resolver import ResolveResult  # type: ignore
+    except (ImportError, AttributeError):
+        class ResolveResult(TypedDict):  # type: ignore[no-redef]
+            """ResolveResult structure compatible with aiohttp resolver API."""
+            hostname: str
+            host: str
+            port: int
+            family: int
+            proto: int
+            flags: int
+
+if not hasattr(aiohttp.resolver, "ResolveResult"):
+    try:
+        aiohttp.resolver.ResolveResult = ResolveResult  # type: ignore[attr-defined]
+    except Exception:
+        pass
+
 from src.core.scope import ScopeManager
 from src.core.rate_limiter import GlobalRateLimiter
 from src.core.header_manager import HeaderManager
@@ -48,7 +79,7 @@ class PolicyAwareResolver(aiohttp.abc.AbstractResolver):
 
     async def resolve(
         self, host: str, port: int = 0, family: socket.AddressFamily = socket.AF_INET
-    ) -> List[aiohttp.resolver.ResolveResult]:
+    ) -> List[ResolveResult]:
         safe, reason = await self.http_client.validate_host_network_safety(host)
         if not safe:
             raise OSError(f"Connection blocked by network policy: {reason}")
@@ -61,12 +92,12 @@ class PolicyAwareResolver(aiohttp.abc.AbstractResolver):
             except ValueError:
                 raise OSError(f"No validated IP available for host '{host}'")
 
-        results = []
+        results: List[ResolveResult] = []
         for ip_str in pinned_ips:
             ip_obj = ipaddress.ip_address(ip_str)
             addr_family = socket.AF_INET6 if ip_obj.version == 6 else socket.AF_INET
             results.append(
-                aiohttp.resolver.ResolveResult(
+                ResolveResult(
                     hostname=host,
                     host=ip_str,
                     port=port,
